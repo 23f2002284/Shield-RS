@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Shield - An AI agent that protects you from manipulative content recommendations" />
+    <title>Shield</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Header -->
+      <header class="header" id="header">
+        <div class="header-left">
+          <button class="nav-link active" data-page="search" id="nav-search">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            Search
+          </button>
+          <button class="nav-link" data-page="compare" id="nav-compare">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+            Compare
+          </button>
+          <button class="nav-link" data-page="profile" id="nav-profile">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            Profile
+          </button>
+        </div>
+        <div class="header-center">
+          <a href="#" class="logo" id="logo-link">
+            <svg class="logo-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span class="logo-text">Shield</span>
+          </a>
+        </div>
+        <div class="header-right">
+          <div class="user-badge" id="user-badge">
+            <span class="user-avatar" id="user-avatar">?</span>
+            <span class="user-name" id="user-name-display">Guest</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- Pages -->
+      <main class="main">
+        <!-- Search Page -->
+        <div class="page active" id="page-search">
+          <div class="search-hero">
+            <h1 class="hero-title">What do you want to learn?</h1>
+            <p class="hero-subtitle">Shield finds the best videos — not the most popular ones</p>
+            <div class="search-container">
+              <div class="search-bar">
+                <svg class="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                <input type="text" id="search-input" placeholder="e.g. machine learning tutorial, climate change, investing..." autocomplete="off" />
+                <button class="search-btn" id="search-btn">Search</button>
+              </div>
+              <div class="search-constraints">
+                <div class="constraint">
+                  <label>Time budget</label>
+                  <select id="time-budget">
+                    <option value="15">15 min</option>
+                    <option value="30" selected>30 min</option>
+                    <option value="60">1 hour</option>
+                    <option value="120">2 hours</option>
+                    <option value="9999">No limit</option>
+                  </select>
+                </div>
+                <div class="constraint">
+                  <label>Quality preference</label>
+                  <select id="quality-pref">
+                    <option value="balanced" selected>Balanced</option>
+                    <option value="scientific">Scientific</option>
+                    <option value="casual">Casual</option>
+                  </select>
+                </div>
+                <div class="constraint">
+                  <label>Max results</label>
+                  <select id="max-results">
+                    <option value="10">10</option>
+                    <option value="20" selected>20</option>
+                    <option value="30">30</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Results metrics bar -->
+          <div class="metrics-bar hidden" id="search-metrics">
+            <div class="metric">
+              <span class="metric-value" id="metric-results">0</span>
+              <span class="metric-label">Results</span>
+            </div>
+            <div class="metric">
+              <span class="metric-value" id="metric-shield">0</span>
+              <span class="metric-label">Avg Shield</span>
+            </div>
+            <div class="metric">
+              <span class="metric-value" id="metric-clickbait">0</span>
+              <span class="metric-label">Avg Clickbait</span>
+            </div>
+            <div class="metric">
+              <span class="metric-value" id="metric-credibility">0</span>
+              <span class="metric-label">Avg Credibility</span>
+            </div>
+            <div class="metric">
+              <span class="metric-value" id="metric-time">0ms</span>
+              <span class="metric-label">Scored in</span>
+            </div>
+          </div>
+
+          <!-- Results grid -->
+          <div class="video-grid" id="search-results"></div>
+          <div class="loading hidden" id="search-loading">
+            <div class="spinner"></div>
+            <p>Scoring videos with Shield agent...</p>
+          </div>
+          <div class="empty-state hidden" id="search-empty">
+            <p>No results found. Try a different search query.</p>
+          </div>
+        </div>
+
+        <!-- Compare Page -->
+        <div class="page" id="page-compare">
+          <div class="compare-header">
+            <h2>YouTube vs Shield</h2>
+            <p>Same videos, different priorities. YouTube ranks by popularity. Shield ranks by quality.</p>
+            <div class="search-bar compare-search">
+              <svg class="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+              <input type="text" id="compare-input" placeholder="Search to compare..." />
+              <button class="search-btn" id="compare-btn">Compare</button>
+            </div>
+          </div>
+          <div class="compare-container hidden" id="compare-container">
+            <div class="compare-column">
+              <div class="compare-title youtube-title">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="#ff0000"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0C.488 3.45.029 5.804 0 12c.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0C23.512 20.55 23.971 18.196 24 12c-.029-6.185-.484-8.549-4.385-8.816zM9 16V8l8 4-8 4z"/></svg>
+                YouTube Ranking
+              </div>
+              <div class="compare-metrics" id="youtube-metrics"></div>
+              <div class="video-list" id="youtube-results"></div>
+            </div>
+            <div class="compare-divider"></div>
+            <div class="compare-column">
+              <div class="compare-title shield-title">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#1a73e8" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                Shield Ranking
+              </div>
+              <div class="compare-metrics" id="shield-metrics"></div>
+              <div class="video-list" id="shield-results"></div>
+            </div>
+          </div>
+          <div class="loading hidden" id="compare-loading">
+            <div class="spinner"></div>
+            <p>Comparing rankings...</p>
+          </div>
+        </div>
+
+        <!-- Profile Page -->
+        <div class="page" id="page-profile">
+          <div class="profile-section">
+            <div class="profile-card" id="profile-card">
+              <div class="profile-header">
+                <div class="profile-avatar" id="profile-avatar">?</div>
+                <div>
+                  <h2 id="profile-name">Guest</h2>
+                  <p class="profile-joined" id="profile-joined">Not signed in</p>
+                </div>
+              </div>
+              <div class="profile-setup hidden" id="profile-setup">
+                <p>Create a profile to track your watch history and get personalized recommendations.</p>
+                <input type="text" id="new-user-name" placeholder="Enter your name" />
+                <button class="btn-primary" id="create-user-btn">Create Profile</button>
+              </div>
+              <div class="profile-prefs hidden" id="profile-prefs">
+                <h3>Preferences</h3>
+                <div class="pref-row">
+                  <label>Quality style</label>
+                  <select id="pref-style">
+                    <option value="balanced">Balanced</option>
+                    <option value="scientific">Scientific</option>
+                    <option value="casual">Casual</option>
+                  </select>
+                </div>
+                <button class="btn-secondary" id="save-prefs-btn">Save Preferences</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="profile-section hidden" id="history-section">
+            <h3>Watch History</h3>
+            <div class="video-list" id="history-list"></div>
+            <div class="empty-state" id="history-empty">
+              <p>No watch history yet. Search and watch some videos!</p>
+            </div>
+          </div>
+
+          <div class="profile-section hidden" id="recommend-section">
+            <h3>Recommended for You</h3>
+            <div class="video-grid" id="recommend-grid"></div>
+          </div>
+        </div>
+      </main>
+
+      <!-- Video Detail Modal -->
+      <div class="modal-overlay hidden" id="video-modal">
+        <div class="modal-content">
+          <button class="modal-close" id="modal-close">&times;</button>
+          <div class="modal-player" id="modal-player"></div>
+          <div class="modal-info">
+            <h2 id="modal-title"></h2>
+            <p class="modal-channel" id="modal-channel"></p>
+            <div class="modal-scores" id="modal-scores"></div>
+            <p class="modal-description" id="modal-description"></p>
+            <div class="modal-explain-section">
+              <button class="btn-explain" id="explain-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                Why this score?
+              </button>
+              <p class="modal-explanation hidden" id="modal-explanation"></p>
+            </div>
+            <div class="modal-actions">
+              <button class="btn-primary" id="modal-watch-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                Mark as Watched
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>

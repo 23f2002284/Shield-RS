@@ -1,0 +1,12 @@
+torch
+transformers
+sentence-transformers
+fastapi
+uvicorn
+google-api-python-client
+youtube-transcript-api
+yt-dlp
+spacy
+python-dotenv
+pandas
+scipy

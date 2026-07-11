@@ -1,0 +1,26 @@
+{
+  "means": {
+    "info_density": 0.4241769,
+    "credibility": 0.1247794,
+    "bias_balance": 0.4520666264722085,
+    "clickbait_score": 0.3883317,
+    "emotional_score": 0.0226053,
+    "duration_minutes": 31.392899999999997,
+    "title_length": 62.841,
+    "desc_length": 1357.283,
+    "tag_count": 11.459,
+    "has_transcript": 0.048
+  },
+  "stds": {
+    "info_density": 0.2677282207698445,
+    "credibility": 0.0853262043969893,
+    "bias_balance": 0.05535137881630877,
+    "clickbait_score": 0.45334221816623466,
+    "emotional_score": 0.03973449070595547,
+    "duration_minutes": 94.55219574734357,
+    "title_length": 22.214707115157115,
+    "desc_length": 1275.507980970923,
+    "tag_count": 11.332287489282105,
+    "has_transcript": 0.213873190797121
+  }
+}
