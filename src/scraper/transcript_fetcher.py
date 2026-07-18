@@ -1,252 +1,251 @@
 """
-Robust Transcript Fetcher with Proxy Support
+src/scraper/transcript_fetcher.py
+==================================
+Tiered transcript fetching for YouTube videos.
 
-Strategies to maximize transcript yield:
-1. Try all English language codes + Hindi
-2. Fall back to auto-generated captions
-3. Fall back to ANY available language transcript
-4. Retry with exponential backoff
-5. Rate limiting with delays between requests
-6. PROXY SUPPORT — rotating residential proxies to bypass IP blocks
-
-Usage:
-  # Without proxy (direct connection)
-  python transcript_fetcher.py --input data.json --output data_out.json
-
-  # With proxy
-  python transcript_fetcher.py --input data.json --output data_out.json \
-      --proxy-url http://user:pass@proxy-host:port
-
-  # Or set proxy in .env file:
-  PROXY_URL=http://user:pass@proxy-host:port
+Tier 1: youtube-transcript-api (free, ~70% coverage)
+Tier 2: YouTube Data API captions (free, manual captions)
+Tier 3: Gemini audio transcription (paid fallback)
 """
 
 import os
 import json
-import time
-import random
-import argparse
-from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
-from youtube_transcript_api._errors import (
-    TranscriptsDisabled,
-    NoTranscriptFound,
-    VideoUnavailable,
-)
+import hashlib
+from pathlib import Path
+from typing import Optional
 
-load_dotenv()
-
-LANGUAGE_CODES = ["en", "en-US", "en-GB", "en-AU", "en-CA", "en-IN", "hi"]
+# Cache directory for transcripts
+TRANSCRIPT_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "transcripts"
+TRANSCRIPT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def create_api(proxy_url: str = None) -> YouTubeTranscriptApi:
+def _cache_path(video_id: str) -> Path:
+    return TRANSCRIPT_CACHE_DIR / f"{video_id}.txt"
+
+
+def _load_cached(video_id: str) -> Optional[str]:
+    """Load transcript from cache if it exists."""
+    path = _cache_path(video_id)
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return None
+
+
+def _save_cache(video_id: str, transcript: str):
+    """Save transcript to cache."""
+    path = _cache_path(video_id)
+    path.write_text(transcript, encoding="utf-8")
+
+
+def _tier1_youtube_transcript_api(video_id: str, language: str = "en") -> Optional[str]:
     """
-    Create a YouTubeTranscriptApi instance, optionally with proxy.
-
-    Args:
-        proxy_url: Proxy URL in format http://user:pass@host:port
-                   If None, checks PROXY_URL in .env
-                   If still None, connects directly
+    Tier 1: Free youtube-transcript-api package.
+    Works for ~70% of videos that have auto-generated or manual captions.
     """
-    if proxy_url is None:
-        proxy_url = os.getenv("PROXY_URL")
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
 
-    if proxy_url:
-        print(f"  Using proxy: {proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url}")
-        proxy_config = WebshareProxyConfig(
-            http_urls
-        )
-        return YouTubeTranscriptApi(proxy_config=proxy_config)
-    else:
-        print("  No proxy configured — using direct connection")
-        return YouTubeTranscriptApi()
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
 
-
-def fetch_transcript_robust(api: YouTubeTranscriptApi, video_id: str, max_retries: int = 3) -> str:
-    """
-    Fetch transcript with multiple fallback strategies.
-
-    Strategy order:
-    1. Try manual English transcripts
-    2. Try auto-generated English transcripts
-    3. Try Hindi transcripts
-    4. Try any available transcript
-    5. Retry on transient failures with exponential backoff
-    """
-    for attempt in range(max_retries):
+        # Try to get the requested language first
         try:
-            # Strategy 1: Try with our preferred language codes
-            transcript = api.fetch(video_id, languages=LANGUAGE_CODES)
-            return " ".join(s.text for s in transcript.snippets)
-
-        except NoTranscriptFound:
-            # Strategy 2-4: List all available transcripts and try them
+            transcript = transcript_list.find_transcript([language])
+        except Exception:
+            # Fall back to any available transcript, translate to English
             try:
-                transcript_list = api.list(video_id)
-
-                # Try any English manual transcript
-                for t in transcript_list:
-                    if t.language_code.startswith("en") and not t.is_generated:
-                        try:
-                            fetched = t.fetch()
-                            return " ".join(s.text for s in fetched.snippets)
-                        except Exception:
-                            continue
-
-                # Try any English auto-generated transcript
-                for t in transcript_list:
-                    if t.language_code.startswith("en") and t.is_generated:
-                        try:
-                            fetched = t.fetch()
-                            return " ".join(s.text for s in fetched.snippets)
-                        except Exception:
-                            continue
-
-                # Try Hindi transcripts
-                for t in transcript_list:
-                    if t.language_code.startswith("hi"):
-                        try:
-                            fetched = t.fetch()
-                            return " ".join(s.text for s in fetched.snippets)
-                        except Exception:
-                            continue
-
-                # Try ANY available transcript as last resort
+                transcript = transcript_list.find_generated_transcript([language])
+            except Exception:
+                # Get any transcript and translate
                 for t in transcript_list:
                     try:
-                        fetched = t.fetch()
-                        return " ".join(s.text for s in fetched.snippets)
+                        if t.language_code != language:
+                            transcript = t.translate(language)
+                        else:
+                            transcript = t
+                        break
                     except Exception:
                         continue
+                else:
+                    return None
 
-                return None
+        entries = transcript.fetch()
+        # Combine all text segments
+        full_text = " ".join(
+            entry.get("text", "") if isinstance(entry, dict) else str(entry)
+            for entry in entries
+        )
+        # Clean up
+        full_text = full_text.replace("\n", " ").replace("  ", " ").strip()
+        return full_text if len(full_text) > 20 else None
 
-            except (TranscriptsDisabled, VideoUnavailable):
-                return None
-            except Exception:
-                if attempt < max_retries - 1:
-                    wait = (2 ** attempt) + random.uniform(0.5, 1.5)
-                    time.sleep(wait)
-                    continue
-                return None
+    except Exception as e:
+        # Common: TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
+        return None
 
-        except (TranscriptsDisabled, VideoUnavailable):
+
+def _tier2_youtube_data_api(video_id: str) -> Optional[str]:
+    """
+    Tier 2: Use YouTube Data API to download manually-uploaded captions.
+    Requires YOUTUBE_API_KEY env var. Costs 200 quota units per caption download.
+    Only use if Tier 1 fails.
+    """
+    try:
+        from googleapiclient.discovery import build
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        api_key = os.getenv("YOUTUBE_API_KEY")
+        if not api_key:
             return None
 
-        except Exception:
-            if attempt < max_retries - 1:
-                wait = (2 ** attempt) + random.uniform(0.5, 1.5)
-                time.sleep(wait)
-                continue
+        youtube = build("youtube", "v3", developerKey=api_key)
+
+        # List captions for the video
+        caption_response = youtube.captions().list(
+            part="snippet",
+            videoId=video_id,
+        ).execute()
+
+        captions = caption_response.get("items", [])
+        if not captions:
             return None
+
+        # Find English caption track
+        target_caption = None
+        for cap in captions:
+            lang = cap["snippet"].get("language", "")
+            if lang.startswith("en"):
+                target_caption = cap
+                break
+
+        if not target_caption:
+            target_caption = captions[0]  # Take first available
+
+        # Note: Actually downloading captions requires OAuth, not just API key
+        # So this tier has limited usefulness without OAuth setup
+        return None
+
+    except Exception:
+        return None
+
+
+def _tier3_gemini_transcription(video_id: str) -> Optional[str]:
+    """
+    Tier 3: Use Gemini to transcribe from YouTube URL.
+    Gemini 2.5 Flash supports video/audio input via URL.
+    Costs ~$0.003 per minute of video.
+    """
+    try:
+        from google import genai
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            return None
+
+        client = genai.Client(api_key=api_key)
+
+        # Gemini can process YouTube URLs directly
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": "Transcribe the spoken content of this YouTube video. Output ONLY the transcript text, no timestamps, no formatting, no commentary."},
+                        {"file_data": {"file_uri": youtube_url, "mime_type": "video/*"}},
+                    ],
+                }
+            ],
+        )
+
+        text = response.text.strip()
+        if len(text) > 50:
+            return text
+        return None
+
+    except Exception as e:
+        print(f"  [Tier3] Gemini transcription failed for {video_id}: {e}")
+        return None
+
+
+def fetch_transcript(
+    video_id: str,
+    language: str = "en",
+    use_cache: bool = True,
+    max_tier: int = 3,
+) -> Optional[str]:
+    """
+    Fetch transcript for a YouTube video using tiered approach.
+
+    Args:
+        video_id: YouTube video ID
+        language: Language code (default "en")
+        use_cache: Whether to check/save cache
+        max_tier: Maximum tier to try (1=free only, 2=+API, 3=+Gemini paid)
+
+    Returns:
+        Transcript text or None if unavailable
+    """
+    # Check cache first
+    if use_cache:
+        cached = _load_cached(video_id)
+        if cached:
+            return cached
+
+    transcript = None
+
+    # Tier 1: youtube-transcript-api (free)
+    if max_tier >= 1:
+        transcript = _tier1_youtube_transcript_api(video_id, language)
+        if transcript:
+            if use_cache:
+                _save_cache(video_id, transcript)
+            return transcript
+
+    # Tier 2: YouTube Data API (free but limited)
+    if max_tier >= 2:
+        transcript = _tier2_youtube_data_api(video_id)
+        if transcript:
+            if use_cache:
+                _save_cache(video_id, transcript)
+            return transcript
+
+    # Tier 3: Gemini transcription (paid)
+    if max_tier >= 3:
+        transcript = _tier3_gemini_transcription(video_id)
+        if transcript:
+            if use_cache:
+                _save_cache(video_id, transcript)
+            return transcript
 
     return None
 
 
-def process_file(
-    input_path: str,
-    output_path: str,
-    proxy_url: str = None,
-    batch_size: int = 20,
-    delay: float = 0.5,
-    retry_failed: bool = False,
-):
+def fetch_transcripts_batch(
+    video_ids: list[str],
+    language: str = "en",
+    max_tier: int = 1,
+    progress: bool = True,
+) -> dict[str, Optional[str]]:
     """
-    Process a JSON file, fetching transcripts with rate limiting.
-
-    Args:
-        retry_failed: If True, re-attempt videos that previously returned null.
-                      Useful when switching from no-proxy to proxy.
+    Fetch transcripts for multiple videos.
+    Returns dict mapping video_id -> transcript (or None).
     """
-    api = create_api(proxy_url)
+    results = {}
+    total = len(video_ids)
 
-    print(f"Loading metadata from {input_path}...")
-    with open(input_path, "r", encoding="utf-8") as f:
-        videos = json.load(f)
+    for i, vid in enumerate(video_ids):
+        if progress and (i + 1) % 10 == 0:
+            print(f"  Transcripts: {i+1}/{total} fetched")
 
-    total = len(videos)
-    already_have = sum(1 for v in videos if v.get("transcript"))
-    need_fetch = total - already_have
-    print(f"  Total videos: {total}")
-    print(f"  Already have transcript: {already_have}")
-    print(f"  Need to fetch: {need_fetch}")
+        results[vid] = fetch_transcript(vid, language, max_tier=max_tier)
 
-    success_count = already_have
-    new_fetched = 0
-    failed_ids = []
+    success = sum(1 for v in results.values() if v is not None)
+    if progress:
+        print(f"  Transcripts: {success}/{total} succeeded ({success/max(total,1)*100:.0f}%)")
 
-    for i, video in enumerate(videos):
-        # Skip videos that already have transcripts
-        if video.get("transcript") and not retry_failed:
-            continue
-
-        # In retry mode, skip videos that already have transcripts
-        if video.get("transcript"):
-            continue
-
-        vid = video["video_id"]
-        transcript = fetch_transcript_robust(api, vid)
-        video["transcript"] = transcript
-
-        if transcript:
-            new_fetched += 1
-            success_count += 1
-            word_count = len(transcript.split())
-            print(f"  [{i+1}/{total}] OK: {vid} ({word_count} words)")
-        else:
-            failed_ids.append(vid)
-            if len(failed_ids) % 50 == 0:
-                print(f"  [{i+1}/{total}] Progress: {success_count} transcripts, {len(failed_ids)} failed so far")
-
-        # Rate limiting
-        time.sleep(delay + random.uniform(0, 0.3))
-
-        # Batch cooldown
-        if new_fetched > 0 and new_fetched % batch_size == 0:
-            print(f"  --- Batch checkpoint: {success_count}/{total} transcripts ({new_fetched} new) ---")
-            # Save intermediate progress
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(videos, f, indent=2, ensure_ascii=False)
-            print(f"  --- Intermediate save complete ---")
-            time.sleep(2)
-
-    print(f"\nResults:")
-    print(f"  Already had: {already_have}")
-    print(f"  Newly fetched: {new_fetched}")
-    print(f"  Total with transcript: {success_count}/{total} ({success_count/total*100:.1f}%)")
-    print(f"  Failed: {len(failed_ids)}")
-
-    # Final save
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(videos, f, indent=2, ensure_ascii=False)
-
-    print(f"  Saved to: {output_path}")
-    return success_count, total
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Robust transcript fetcher with proxy support")
-    parser.add_argument("--input", type=str, required=True)
-    parser.add_argument("--output", type=str, required=True)
-    parser.add_argument("--proxy-url", type=str, default=None,
-                        help="Proxy URL: http://user:pass@host:port (or set PROXY_URL in .env)")
-    parser.add_argument("--delay", type=float, default=0.5,
-                        help="Delay between requests in seconds (default: 0.5)")
-    parser.add_argument("--batch-size", type=int, default=20,
-                        help="Save progress every N new transcripts")
-    parser.add_argument("--retry-failed", action="store_true",
-                        help="Retry videos that previously returned null")
-    args = parser.parse_args()
-    process_file(
-        args.input, args.output,
-        proxy_url=args.proxy_url,
-        batch_size=args.batch_size,
-        delay=args.delay,
-        retry_failed=args.retry_failed,
-    )
-
-
-if __name__ == "__main__":
-    main()
+    return results

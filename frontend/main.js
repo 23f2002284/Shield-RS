@@ -1,581 +1,1082 @@
 /**
- * Shield — Frontend Application
- * Connects to FastAPI backend at /api/*
+ * Shield v3 — YouTube-Clone Frontend
+ * ====================================
+ * Features:
+ *   - Auto-save watch history when video plays (YouTube IFrame API)
+ *   - Stop video on page navigation
+ *   - Dynamic topic suggestions in search
+ *   - Dark theme default
+ *   - Full SPA: auth, feed, search, compare, watch, settings
  */
 
-const API = ""; // Uses Vite proxy in dev - forwards /api/* to localhost:8000
+const API = '/api';
 
-// -- State --
-let currentUser = JSON.parse(localStorage.getItem("shield_user") || "null");
-let currentPage = "search";
-let lastSearchQuery = ""; // Syncs search query to compare tab
+// ── State ──
+let currentUser = null;
+let feedCache = [];
+let feedTopics = [];
+let currentPage = 'home';
+let currentVideo = null;
+let ytPlayer = null;           // YouTube IFrame API player
+let watchStartTime = null;     // When video started playing
+let watchAutoSaved = false;    // Prevent double-saving
 
-// -- DOM Refs --
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => document.querySelectorAll(sel);
+// ── Dynamic Topic Suggestions ──
+const TOPIC_SUGGESTIONS = [
+  { text: 'Machine Learning tutorial', icon: 'search' },
+  { text: 'Climate change documentary', icon: 'search' },
+  { text: 'How to invest for beginners', icon: 'search' },
+  { text: 'Ancient history documentary', icon: 'search' },
+  { text: 'Healthy meal prep ideas', icon: 'search' },
+  { text: 'Home workout routine', icon: 'search' },
+  { text: 'Psychology explained', icon: 'search' },
+  { text: 'Space exploration documentary', icon: 'search' },
+  { text: 'Web development crash course', icon: 'search' },
+  { text: 'Quantum physics for beginners', icon: 'search' },
+  { text: 'Music theory basics', icon: 'search' },
+  { text: 'Filmmaking tips', icon: 'search' },
+  { text: 'Startup advice', icon: 'search' },
+  { text: 'Learn a new language', icon: 'search' },
+  { text: 'Philosophy of life', icon: 'search' },
+  { text: 'Biology explained', icon: 'search' },
+  { text: 'Game design tutorial', icon: 'search' },
+  { text: 'World politics explained', icon: 'search' },
+  { text: 'Digital art for beginners', icon: 'search' },
+  { text: 'DIY engineering projects', icon: 'search' },
+];
 
-// -- Helpers --
-function formatDuration(seconds) {
-  if (!seconds) return "";
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
+// ── Init ──
+document.addEventListener('DOMContentLoaded', () => {
+  loadYouTubeAPI();
+  restoreSession();
+  setupNav();
+  setupAuth();
+  setupSearch();
+  setupCompare();
+  setupSettings();
+  loadFeed();
+});
+
+// ============================================================
+// YouTube IFrame API (for auto-watch tracking)
+// ============================================================
+function loadYouTubeAPI() {
+  const tag = document.createElement('script');
+  tag.src = 'https://www.youtube.com/iframe_api';
+  document.head.appendChild(tag);
 }
 
-function formatCount(n) {
-  if (!n || n === 0) return "0";
-  if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
-  if (n >= 1000) return (n / 1000).toFixed(1) + "K";
-  return String(n);
-}
+// Global callback required by YouTube IFrame API
+window.onYouTubeIframeAPIReady = function() {
+  console.log('[Shield] YouTube IFrame API ready');
+};
 
-function scoreColor(score) {
-  if (score >= 0.6) return "green";
-  if (score >= 0.35) return "amber";
-  return "red";
-}
+function createYTPlayer(videoId) {
+  destroyYTPlayer();
+  watchAutoSaved = false;
+  watchStartTime = null;
 
-function scoreLabel(score) {
-  return Math.round(score * 100);
-}
+  const container = document.getElementById('watch-player');
+  container.innerHTML = '<div id="yt-player-target"></div>';
 
-function getThumbnail(video) {
-  if (video.thumbnail) return video.thumbnail;
-  if (video.thumbnail_url) return video.thumbnail_url;
-  const vid = video.video_id || "";
-  return `https://img.youtube.com/vi/${vid}/mqdefault.jpg`;
-}
-
-async function apiFetch(path, options = {}) {
-  try {
-    const res = await fetch(`${API}${path}`, {
-      headers: { "Content-Type": "application/json" },
-      ...options,
+  if (typeof YT !== 'undefined' && YT.Player) {
+    ytPlayer = new YT.Player('yt-player-target', {
+      videoId: videoId,
+      width: '100%',
+      height: '100%',
+      playerVars: {
+        autoplay: 1,
+        modestbranding: 1,
+        rel: 0,
+      },
+      events: {
+        onStateChange: onPlayerStateChange,
+      },
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    console.error(`API error: ${path}`, err);
-    return null;
+  } else {
+    // Fallback: plain iframe if API not loaded yet
+    container.innerHTML = `
+      <iframe src="https://www.youtube.com/embed/${videoId}?autoplay=1&modestbranding=1&rel=0"
+        allow="autoplay; encrypted-media" allowfullscreen
+        style="width:100%;height:100%;border:none;"></iframe>
+    `;
   }
 }
 
-// -- Navigation --
-function navigateTo(page) {
-  currentPage = page;
-  $$(".page").forEach((p) => p.classList.remove("active"));
-  $(`#page-${page}`).classList.add("active");
-  $$(".nav-link").forEach((n) => n.classList.remove("active"));
-  $(`#nav-${page}`).classList.add("active");
+function onPlayerStateChange(event) {
+  // YT.PlayerState: PLAYING=1, PAUSED=2, ENDED=0
+  if (event.data === 1 && !watchStartTime) {
+    // Video started playing
+    watchStartTime = Date.now();
+  }
 
-  if (page === "profile") renderProfile();
+  if ((event.data === 0 || event.data === 2) && !watchAutoSaved && watchStartTime && currentVideo) {
+    // Video ended or paused — auto-save to history
+    const watchedSeconds = Math.round((Date.now() - watchStartTime) / 1000);
+    const totalSeconds = currentVideo.duration_seconds || 300;
+    const watchPct = Math.min(1.0, watchedSeconds / Math.max(totalSeconds, 1));
 
-  // Sync search query to compare tab
-  if (page === "compare" && lastSearchQuery) {
-    const compareInput = $("#compare-input");
-    if (compareInput && !compareInput.value.trim()) {
-      compareInput.value = lastSearchQuery;
-      // Auto-trigger compare if we have a query
-      performCompare();
+    // Only auto-save if watched > 10 seconds
+    if (watchedSeconds > 10) {
+      autoSaveWatch(currentVideo, watchPct, watchedSeconds);
+    }
+
+    // If video ended, reset start time for replay
+    if (event.data === 0) {
+      watchStartTime = null;
     }
   }
 }
 
-// -- Video Card --
+function destroyYTPlayer() {
+  // Save watch progress before destroying
+  if (ytPlayer && watchStartTime && currentVideo && !watchAutoSaved) {
+    const watchedSeconds = Math.round((Date.now() - watchStartTime) / 1000);
+    const totalSeconds = currentVideo.duration_seconds || 300;
+    const watchPct = Math.min(1.0, watchedSeconds / Math.max(totalSeconds, 1));
+    if (watchedSeconds > 10) {
+      autoSaveWatch(currentVideo, watchPct, watchedSeconds);
+    }
+  }
+
+  if (ytPlayer && typeof ytPlayer.destroy === 'function') {
+    try { ytPlayer.destroy(); } catch {}
+  }
+  ytPlayer = null;
+  watchStartTime = null;
+
+  // Also clear any plain iframes
+  const container = document.getElementById('watch-player');
+  if (container) container.innerHTML = '';
+}
+
+async function autoSaveWatch(video, watchPct, watchedSeconds) {
+  if (!currentUser || watchAutoSaved) return;
+  watchAutoSaved = true;
+
+  try {
+    await fetch(`${API}/users/${currentUser.id}/history`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        video_id: video.video_id || '',
+        title: video.title || '',
+        channel: video.channel_name || video.channel || '',
+        thumbnail: video.thumbnail_url || video.thumbnail || '',
+        duration_seconds: video.duration_seconds || 0,
+        watch_pct: watchPct,
+        agent_scores: video.agent_scores || {},
+      }),
+    });
+
+    // Show auto-save toast
+    showToast(`Saved to history (${formatDuration(watchedSeconds)} watched)`);
+  } catch (err) {
+    console.error('Auto-save watch failed:', err);
+    watchAutoSaved = false;
+  }
+}
+
+function showToast(message) {
+  const existing = document.querySelector('.auto-watch-toast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.className = 'auto-watch-toast';
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 3000);
+}
+
+// ============================================================
+// Session Management
+// ============================================================
+function restoreSession() {
+  const saved = localStorage.getItem('shield_user');
+  if (saved) {
+    try {
+      currentUser = JSON.parse(saved);
+      updateAuthUI();
+    } catch { currentUser = null; }
+  }
+}
+
+function saveSession(user) {
+  currentUser = user;
+  localStorage.setItem('shield_user', JSON.stringify(user));
+  updateAuthUI();
+}
+
+function clearSession() {
+  currentUser = null;
+  localStorage.removeItem('shield_user');
+  updateAuthUI();
+}
+
+function updateAuthUI() {
+  const signinBtn = document.getElementById('signin-btn');
+  const userMenu = document.getElementById('user-menu');
+
+  if (currentUser) {
+    signinBtn.classList.add('hidden');
+    userMenu.classList.remove('hidden');
+    const initial = (currentUser.name || '?')[0].toUpperCase();
+    document.getElementById('avatar-btn').textContent = initial;
+    document.getElementById('dropdown-avatar').textContent = initial;
+    document.getElementById('dropdown-name').textContent = currentUser.name;
+    document.getElementById('dropdown-email').textContent = currentUser.email || '';
+  } else {
+    signinBtn.classList.remove('hidden');
+    userMenu.classList.add('hidden');
+  }
+}
+
+// ============================================================
+// Navigation (stops video on page change)
+// ============================================================
+function setupNav() {
+  document.querySelectorAll('.sidebar-item[data-page]').forEach(btn => {
+    btn.addEventListener('click', () => navigateTo(btn.dataset.page));
+  });
+
+  document.getElementById('menu-toggle').addEventListener('click', () => {
+    document.getElementById('sidebar').classList.toggle('collapsed');
+  });
+
+  document.getElementById('logo-home').addEventListener('click', (e) => {
+    e.preventDefault();
+    navigateTo('home');
+  });
+
+  document.querySelectorAll('.dropdown-item[data-page]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.getElementById('user-dropdown').classList.add('hidden');
+      navigateTo(btn.dataset.page);
+    });
+  });
+
+  document.getElementById('avatar-btn')?.addEventListener('click', () => {
+    document.getElementById('user-dropdown').classList.toggle('hidden');
+  });
+
+  document.addEventListener('click', (e) => {
+    const dropdown = document.getElementById('user-dropdown');
+    const menu = document.getElementById('user-menu');
+    if (dropdown && !dropdown.classList.contains('hidden') && !menu.contains(e.target)) {
+      dropdown.classList.add('hidden');
+    }
+  });
+
+  document.getElementById('signout-btn')?.addEventListener('click', () => {
+    clearSession();
+    document.getElementById('user-dropdown').classList.add('hidden');
+    navigateTo('home');
+  });
+}
+
+function navigateTo(page) {
+  // ── STOP VIDEO when leaving watch page ──
+  if (currentPage === 'watch' && page !== 'watch') {
+    destroyYTPlayer();
+  }
+
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.sidebar-item').forEach(b => b.classList.remove('active'));
+
+  const pageEl = document.getElementById(`page-${page}`);
+  if (pageEl) pageEl.classList.add('active');
+
+  const navEl = document.getElementById(`nav-${page}`);
+  if (navEl) navEl.classList.add('active');
+
+  currentPage = page;
+
+  if (page === 'trending') loadTrending();
+  if (page === 'history') loadHistory();
+  if (page === 'settings') loadSettings();
+}
+
+// ============================================================
+// Auth
+// ============================================================
+function setupAuth() {
+  const modal = document.getElementById('auth-modal');
+  const loginForm = document.getElementById('login-form');
+  const registerForm = document.getElementById('register-form');
+
+  document.getElementById('signin-btn').addEventListener('click', () => {
+    modal.classList.remove('hidden');
+    loginForm.classList.remove('hidden');
+    registerForm.classList.add('hidden');
+  });
+
+  document.getElementById('auth-close').addEventListener('click', () => {
+    modal.classList.add('hidden');
+  });
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.classList.add('hidden');
+  });
+
+  document.getElementById('show-register').addEventListener('click', (e) => {
+    e.preventDefault();
+    loginForm.classList.add('hidden');
+    registerForm.classList.remove('hidden');
+  });
+  document.getElementById('show-login').addEventListener('click', (e) => {
+    e.preventDefault();
+    registerForm.classList.add('hidden');
+    loginForm.classList.remove('hidden');
+  });
+
+  // Login
+  document.getElementById('login-btn').addEventListener('click', async () => {
+    const email = document.getElementById('login-email').value.trim();
+    const password = document.getElementById('login-password').value;
+    const errorEl = document.getElementById('login-error');
+
+    if (!email || !password) {
+      errorEl.textContent = 'Please enter email and password';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        errorEl.textContent = data.detail || 'Login failed';
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      saveSession(data);
+      modal.classList.add('hidden');
+      loadFeed();
+    } catch (err) {
+      errorEl.textContent = 'Connection error';
+      errorEl.classList.remove('hidden');
+    }
+  });
+
+  // Register
+  document.getElementById('register-btn').addEventListener('click', async () => {
+    const name = document.getElementById('reg-name').value.trim();
+    const email = document.getElementById('reg-email').value.trim();
+    const password = document.getElementById('reg-password').value;
+    const location = document.getElementById('reg-location').value;
+    const language = document.getElementById('reg-language').value;
+    const strictness = document.getElementById('reg-strictness').value;
+    const errorEl = document.getElementById('register-error');
+
+    const topics = [];
+    document.querySelectorAll('#reg-topics input:checked').forEach(cb => {
+      topics.push(cb.value);
+    });
+
+    if (!name || !email || !password) {
+      errorEl.textContent = 'Please fill in name, email, and password';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+    if (password.length < 6) {
+      errorEl.textContent = 'Password must be at least 6 characters';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name, email, password, location, language,
+          preferred_topics: topics,
+          content_strictness: strictness,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        errorEl.textContent = data.detail || 'Registration failed';
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      saveSession(data);
+      modal.classList.add('hidden');
+      loadFeed();
+    } catch (err) {
+      errorEl.textContent = 'Connection error';
+      errorEl.classList.remove('hidden');
+    }
+  });
+}
+
+// ============================================================
+// Feed (Home Page)
+// ============================================================
+async function loadFeed() {
+  const grid = document.getElementById('feed-grid');
+  const filterBar = document.getElementById('topic-filter-bar');
+
+  try {
+    let url = `${API}/feed?limit=60`;
+    if (currentUser) {
+      url += `&user_id=${currentUser.id}`;
+    }
+
+    const res = await fetch(url);
+    const data = await res.json();
+
+    feedCache = data.videos || [];
+    feedTopics = data.topics || [];
+
+    // Build topic filter chips
+    filterBar.innerHTML = '<button class="filter-chip active" data-topic="all">All</button>';
+    feedTopics.forEach(topic => {
+      const btn = document.createElement('button');
+      btn.className = 'filter-chip';
+      btn.dataset.topic = topic;
+      btn.textContent = topic;
+      filterBar.appendChild(btn);
+    });
+
+    filterBar.querySelectorAll('.filter-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        filterBar.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        renderFeed(chip.dataset.topic);
+      });
+    });
+
+    // Populate sidebar topics
+    const sidebarTopics = document.getElementById('sidebar-topics');
+    sidebarTopics.innerHTML = '';
+    feedTopics.forEach(topic => {
+      const btn = document.createElement('button');
+      btn.className = 'sidebar-topic-btn';
+      btn.textContent = topic;
+      btn.addEventListener('click', () => {
+        filterBar.querySelectorAll('.filter-chip').forEach(c => {
+          c.classList.toggle('active', c.dataset.topic === topic);
+        });
+        navigateTo('home');
+        renderFeed(topic);
+      });
+      sidebarTopics.appendChild(btn);
+    });
+
+    renderFeed('all');
+  } catch (err) {
+    console.error('Feed load failed:', err);
+    grid.innerHTML = '<div class="empty-state"><p>Failed to load feed. Is the backend running?</p></div>';
+  }
+}
+
+function renderFeed(topic) {
+  const grid = document.getElementById('feed-grid');
+  let videos = feedCache;
+
+  if (topic !== 'all') {
+    videos = videos.filter(v => v.topic === topic);
+  }
+
+  grid.innerHTML = '';
+  videos.forEach(v => {
+    grid.appendChild(createVideoCard(v));
+  });
+
+  if (videos.length === 0) {
+    grid.innerHTML = '<div class="empty-state"><p>No videos in this category yet.</p></div>';
+  }
+}
+
+// ============================================================
+// Search with Dynamic Suggestions
+// ============================================================
+function setupSearch() {
+  const input = document.getElementById('global-search');
+  const btn = document.getElementById('global-search-btn');
+  const suggestionsEl = document.getElementById('search-suggestions');
+
+  const doSearch = () => {
+    const q = input.value.trim();
+    if (!q) return;
+    suggestionsEl.classList.add('hidden');
+    navigateTo('search');
+    performSearch(q);
+  };
+
+  btn.addEventListener('click', doSearch);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doSearch();
+    if (e.key === 'Escape') suggestionsEl.classList.add('hidden');
+  });
+
+  // Dynamic suggestions on focus/input
+  input.addEventListener('focus', () => showSuggestions(input.value));
+  input.addEventListener('input', () => showSuggestions(input.value));
+
+  // Hide on click outside
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.topbar-search-wrapper')) {
+      suggestionsEl.classList.add('hidden');
+    }
+  });
+}
+
+function showSuggestions(query) {
+  const suggestionsEl = document.getElementById('search-suggestions');
+  const q = query.toLowerCase().trim();
+
+  let items = [];
+
+  // Section 1: Matching catalog topics
+  if (q.length > 0) {
+    const matching = TOPIC_SUGGESTIONS.filter(s =>
+      s.text.toLowerCase().includes(q)
+    ).slice(0, 5);
+    if (matching.length > 0) items.push(...matching);
+
+    // Section 2: Search within cached video titles
+    const titleMatches = feedCache
+      .filter(v => v.title && v.title.toLowerCase().includes(q))
+      .slice(0, 3)
+      .map(v => ({ text: v.title.substring(0, 60), icon: 'video', video: v }));
+    if (titleMatches.length > 0) items.push(...titleMatches);
+  } else {
+    // Show trending suggestions when empty
+    const shuffled = [...TOPIC_SUGGESTIONS].sort(() => Math.random() - 0.5).slice(0, 8);
+    items = shuffled;
+  }
+
+  if (items.length === 0) {
+    suggestionsEl.classList.add('hidden');
+    return;
+  }
+
+  suggestionsEl.innerHTML = '';
+
+  // Add section header
+  if (q.length === 0) {
+    suggestionsEl.innerHTML = '<div class="suggestion-section">Trending searches</div>';
+  }
+
+  items.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'suggestion-item';
+    const iconSvg = item.icon === 'video'
+      ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>'
+      : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>';
+
+    div.innerHTML = `${iconSvg}<span>${escapeHtml(item.text)}</span>`;
+    div.addEventListener('click', () => {
+      const input = document.getElementById('global-search');
+      if (item.video) {
+        // Direct to video
+        openWatch(item.video);
+      } else {
+        input.value = item.text;
+        suggestionsEl.classList.add('hidden');
+        navigateTo('search');
+        performSearch(item.text);
+      }
+    });
+    suggestionsEl.appendChild(div);
+  });
+
+  suggestionsEl.classList.remove('hidden');
+}
+
+async function performSearch(query) {
+  const grid = document.getElementById('search-grid');
+  const header = document.getElementById('search-header');
+  const metrics = document.getElementById('search-metrics');
+  const loading = document.getElementById('search-loading');
+  const empty = document.getElementById('search-empty');
+
+  grid.innerHTML = '';
+  header.innerHTML = '';
+  metrics.innerHTML = '';
+  loading.classList.remove('hidden');
+  empty.classList.add('hidden');
+
+  // Sync to compare input
+  const compareInput = document.getElementById('compare-input');
+  if (compareInput) compareInput.value = query;
+
+  try {
+    const res = await fetch(`${API}/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, max_results: 20 }),
+    });
+    const data = await res.json();
+
+    loading.classList.add('hidden');
+
+    const videos = data.videos || [];
+    if (videos.length === 0) {
+      empty.classList.remove('hidden');
+      return;
+    }
+
+    header.innerHTML = `Showing ${videos.length} results for "<strong>${escapeHtml(query)}</strong>" &middot; ${data.elapsed_ms}ms`;
+
+    const m = data.metrics || {};
+    metrics.innerHTML = `
+      <div><span class="compare-metric-label">Avg Shield</span><br><span class="compare-metric-value">${pct(m.avg_shield_score)}</span></div>
+      <div><span class="compare-metric-label">Avg Clickbait</span><br><span class="compare-metric-value">${pct(m.avg_clickbait)}</span></div>
+      <div><span class="compare-metric-label">Avg Credibility</span><br><span class="compare-metric-value">${pct(m.avg_credibility)}</span></div>
+      <div><span class="compare-metric-label">Total Duration</span><br><span class="compare-metric-value">${m.total_duration_minutes || 0} min</span></div>
+    `;
+
+    videos.forEach(v => grid.appendChild(createVideoCard(v)));
+  } catch (err) {
+    loading.classList.add('hidden');
+    grid.innerHTML = '<div class="empty-state"><p>Search failed. Check backend connection.</p></div>';
+  }
+}
+
+// ============================================================
+// Compare
+// ============================================================
+function setupCompare() {
+  const input = document.getElementById('compare-input');
+  const btn = document.getElementById('compare-btn');
+
+  const doCompare = () => {
+    const q = input.value.trim();
+    if (!q) return;
+    performCompare(q);
+  };
+
+  btn.addEventListener('click', doCompare);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doCompare();
+  });
+}
+
+async function performCompare(query) {
+  const container = document.getElementById('compare-container');
+  const loading = document.getElementById('compare-loading');
+  const ytResults = document.getElementById('youtube-results');
+  const shResults = document.getElementById('shield-results');
+  const ytMetrics = document.getElementById('yt-compare-metrics');
+  const shMetrics = document.getElementById('sh-compare-metrics');
+
+  container.classList.add('hidden');
+  loading.classList.remove('hidden');
+
+  try {
+    const res = await fetch(`${API}/compare`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, max_results: 15 }),
+    });
+    const data = await res.json();
+
+    loading.classList.add('hidden');
+    container.classList.remove('hidden');
+
+    const ytM = data.youtube?.metrics || {};
+    ytMetrics.innerHTML = `
+      <div><span class="compare-metric-label">Avg Shield</span><br><span class="compare-metric-value">${pct(ytM.avg_shield_score)}</span></div>
+      <div><span class="compare-metric-label">Avg Clickbait</span><br><span class="compare-metric-value">${pct(ytM.avg_clickbait)}</span></div>
+      <div><span class="compare-metric-label">Avg Credibility</span><br><span class="compare-metric-value">${pct(ytM.avg_credibility)}</span></div>
+    `;
+
+    const shM = data.shield?.metrics || {};
+    shMetrics.innerHTML = `
+      <div><span class="compare-metric-label">Avg Shield</span><br><span class="compare-metric-value">${pct(shM.avg_shield_score)}</span></div>
+      <div><span class="compare-metric-label">Avg Clickbait</span><br><span class="compare-metric-value">${pct(shM.avg_clickbait)}</span></div>
+      <div><span class="compare-metric-label">Avg Credibility</span><br><span class="compare-metric-value">${pct(shM.avg_credibility)}</span></div>
+    `;
+
+    ytResults.innerHTML = '';
+    (data.youtube?.videos || []).forEach((v, i) => {
+      ytResults.appendChild(createCompareItem(v, i + 1, 'youtube'));
+    });
+
+    shResults.innerHTML = '';
+    (data.shield?.videos || []).forEach((v, i) => {
+      shResults.appendChild(createCompareItem(v, i + 1, 'shield'));
+    });
+  } catch (err) {
+    loading.classList.add('hidden');
+    container.classList.remove('hidden');
+    ytResults.innerHTML = '<div class="empty-state"><p>Compare failed.</p></div>';
+  }
+}
+
+function createCompareItem(video, rank, side) {
+  const div = document.createElement('div');
+  div.className = 'compare-item';
+  div.addEventListener('click', () => openWatch(video));
+
+  const scores = video.agent_scores || {};
+  const thumb = video.thumbnail_url || video.thumbnail || `https://img.youtube.com/vi/${video.video_id}/mqdefault.jpg`;
+
+  let tagsHtml = '';
+  if (side === 'youtube') {
+    tagsHtml = `
+      <span class="score-tag yt">${formatCount(video.view_count || 0)} views</span>
+      <span class="score-tag yt">${formatCount(video.like_count || 0)} likes</span>
+      <span class="score-tag yt">${formatCount(video.subscriber_count || 0)} subs</span>
+    `;
+  } else {
+    tagsHtml = `
+      <span class="score-tag ${scoreColor(scores.shield_score)}">Shield ${pct(scores.shield_score)}</span>
+      <span class="score-tag ${scoreColor(scores.credibility)}">Cred ${pct(scores.credibility)}</span>
+      <span class="score-tag ${cbColor(scores.clickbait)}">CB ${pct(scores.clickbait)}</span>
+    `;
+  }
+
+  div.innerHTML = `
+    <span class="compare-rank">${rank}</span>
+    <div class="compare-thumb"><img src="${escapeHtml(thumb)}" alt="" loading="lazy" /></div>
+    <div class="compare-info">
+      <div class="compare-title">${escapeHtml(video.title || '')}</div>
+      <div class="compare-channel">${escapeHtml(video.channel_name || video.channel || '')}</div>
+      <div class="compare-tags">${tagsHtml}</div>
+    </div>
+  `;
+  return div;
+}
+
+// ============================================================
+// Watch Page (with auto-tracking)
+// ============================================================
+function openWatch(video) {
+  // Stop any currently playing video first
+  destroyYTPlayer();
+
+  currentVideo = video;
+  navigateTo('watch');
+
+  const scores = video.agent_scores || {};
+  const vid = video.video_id || '';
+
+  // Use YouTube IFrame API for tracking
+  createYTPlayer(vid);
+
+  // Info
+  document.getElementById('watch-title').textContent = video.title || '';
+  document.getElementById('watch-channel').textContent = video.channel_name || video.channel || '';
+  document.getElementById('watch-views').textContent = `${formatCount(video.view_count || 0)} views`;
+
+  // Shield bar
+  const bar = document.getElementById('watch-shield-bar');
+  bar.innerHTML = `
+    <div class="shield-metric"><div class="shield-metric-value" style="color:${scoreHex(scores.shield_score)}">${pct(scores.shield_score)}</div><div class="shield-metric-label">Shield</div></div>
+    <div class="shield-metric"><div class="shield-metric-value" style="color:${cbHex(scores.clickbait)}">${pct(scores.clickbait)}</div><div class="shield-metric-label">Clickbait</div></div>
+    <div class="shield-metric"><div class="shield-metric-value" style="color:${scoreHex(scores.credibility)}">${pct(scores.credibility)}</div><div class="shield-metric-label">Credibility</div></div>
+    <div class="shield-metric"><div class="shield-metric-value" style="color:${scoreHex(scores.info_density)}">${pct(scores.info_density)}</div><div class="shield-metric-label">Info Density</div></div>
+    <div class="shield-metric"><div class="shield-metric-value" style="color:${cbHex(scores.emotional_manipulation)}">${pct(scores.emotional_manipulation)}</div><div class="shield-metric-label">Emotion</div></div>
+  `;
+
+  // Description
+  const desc = video.description || '';
+  document.getElementById('watch-description').textContent = desc.substring(0, 500) + (desc.length > 500 ? '...' : '');
+
+  // Hide previous explanation
+  document.getElementById('watch-explanation').classList.add('hidden');
+
+  // Explain button
+  document.getElementById('watch-explain-btn').onclick = () => explainVideo(video);
+
+  // Update mark button to show auto-save status
+  const markBtn = document.getElementById('watch-mark-btn');
+  markBtn.innerHTML = `
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+    ${currentUser ? 'Auto-tracking watch time' : 'Sign in to track history'}
+  `;
+
+  // Load recommendations
+  loadWatchRecs(video);
+}
+
+async function explainVideo(video) {
+  const el = document.getElementById('watch-explanation');
+  el.classList.remove('hidden');
+  el.textContent = 'Generating explanation...';
+
+  try {
+    const res = await fetch(`${API}/explain`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: video.title || '',
+        channel: video.channel_name || video.channel || '',
+        description: (video.description || '').substring(0, 300),
+        agent_scores: video.agent_scores || {},
+        query: document.getElementById('global-search').value || '',
+      }),
+    });
+    const data = await res.json();
+    el.textContent = data.explanation || 'No explanation available.';
+  } catch {
+    el.textContent = 'Failed to generate explanation.';
+  }
+}
+
+function loadWatchRecs(currentVid) {
+  const recsEl = document.getElementById('watch-recs');
+  recsEl.innerHTML = '';
+
+  const topic = currentVid.topic || '';
+  let recs = feedCache.filter(v =>
+    v.video_id !== currentVid.video_id &&
+    (v.topic === topic || !topic)
+  ).slice(0, 15);
+
+  if (recs.length === 0) recs = feedCache.slice(0, 15);
+
+  recs.forEach(v => {
+    const item = document.createElement('div');
+    item.className = 'rec-item';
+    item.addEventListener('click', () => openWatch(v));
+
+    const scores = v.agent_scores || {};
+    const thumb = v.thumbnail_url || v.thumbnail || `https://img.youtube.com/vi/${v.video_id}/mqdefault.jpg`;
+
+    item.innerHTML = `
+      <div class="rec-thumb"><img src="${escapeHtml(thumb)}" alt="" loading="lazy" /></div>
+      <div class="rec-info">
+        <div class="rec-title">${escapeHtml(v.title || '')}</div>
+        <div class="rec-channel">${escapeHtml(v.channel_name || v.channel || '')}</div>
+        <div class="rec-shield">Shield ${pct(scores.shield_score)}</div>
+      </div>
+    `;
+    recsEl.appendChild(item);
+  });
+}
+
+// ============================================================
+// Trending
+// ============================================================
+async function loadTrending() {
+  const grid = document.getElementById('trending-grid');
+  grid.innerHTML = '';
+
+  const sorted = [...feedCache].sort((a, b) =>
+    (b.agent_scores?.shield_score || 0) - (a.agent_scores?.shield_score || 0)
+  ).slice(0, 30);
+
+  sorted.forEach(v => grid.appendChild(createVideoCard(v)));
+}
+
+// ============================================================
+// History
+// ============================================================
+async function loadHistory() {
+  const grid = document.getElementById('history-grid');
+  const empty = document.getElementById('history-empty');
+
+  if (!currentUser) {
+    grid.innerHTML = '';
+    empty.classList.remove('hidden');
+    empty.querySelector('p').textContent = 'Sign in to see your watch history.';
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/users/${currentUser.id}/history?limit=30`);
+    const history = await res.json();
+
+    if (!history || history.length === 0) {
+      grid.innerHTML = '';
+      empty.classList.remove('hidden');
+      return;
+    }
+
+    empty.classList.add('hidden');
+    grid.innerHTML = '';
+    history.forEach(h => {
+      const card = createVideoCard({
+        video_id: h.video_id,
+        title: h.title,
+        channel_name: h.channel,
+        thumbnail: h.thumbnail,
+        duration_seconds: h.duration_seconds,
+        agent_scores: h.agent_scores,
+      });
+      grid.appendChild(card);
+    });
+  } catch (err) {
+    grid.innerHTML = '<div class="empty-state"><p>Failed to load history.</p></div>';
+  }
+}
+
+// ============================================================
+// Settings
+// ============================================================
+function setupSettings() {
+  document.getElementById('save-settings-btn').addEventListener('click', saveSettings);
+}
+
+function loadSettings() {
+  const card = document.getElementById('settings-card');
+  const guest = document.getElementById('settings-guest');
+
+  if (!currentUser) {
+    card.classList.add('hidden');
+    guest.classList.remove('hidden');
+    return;
+  }
+
+  card.classList.remove('hidden');
+  guest.classList.add('hidden');
+
+  document.getElementById('settings-name').value = currentUser.name || '';
+  document.getElementById('settings-email').value = currentUser.email || '';
+  document.getElementById('settings-location').value = currentUser.location || '';
+  document.getElementById('settings-language').value = currentUser.language || 'en';
+  document.getElementById('settings-strictness').value = currentUser.content_strictness || 'balanced';
+
+  const topicsEl = document.getElementById('settings-topics');
+  const allTopics = [
+    ['machine_learning_ai', 'AI / ML'], ['climate_change', 'Climate'],
+    ['investing_finance', 'Finance'], ['history_ancient', 'History'],
+    ['healthy_cooking', 'Cooking'], ['fitness_workout', 'Fitness'],
+    ['psychology_mental_health', 'Psychology'], ['space_astronomy', 'Space'],
+    ['programming_webdev', 'Coding'], ['physics_math', 'Physics'],
+    ['music_theory', 'Music'], ['photography_film', 'Film'],
+    ['entrepreneurship', 'Startups'], ['language_learning', 'Languages'],
+    ['philosophy_ethics', 'Philosophy'], ['biology_medicine', 'Biology'],
+    ['gaming_design', 'Gaming'], ['politics_geopolitics', 'Politics'],
+    ['art_design', 'Art'], ['diy_engineering', 'DIY'],
+  ];
+
+  const userTopics = currentUser.preferred_topics || [];
+  topicsEl.innerHTML = allTopics.map(([key, label]) => `
+    <label class="topic-chip">
+      <input type="checkbox" value="${key}" ${userTopics.includes(key) ? 'checked' : ''} />
+      <span>${label}</span>
+    </label>
+  `).join('');
+}
+
+async function saveSettings() {
+  if (!currentUser) return;
+
+  const topics = [];
+  document.querySelectorAll('#settings-topics input:checked').forEach(cb => topics.push(cb.value));
+
+  try {
+    const res = await fetch(`${API}/users/${currentUser.id}/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: document.getElementById('settings-name').value.trim(),
+        location: document.getElementById('settings-location').value,
+        language: document.getElementById('settings-language').value,
+        content_strictness: document.getElementById('settings-strictness').value,
+        preferred_topics: topics,
+      }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      saveSession(data);
+      showToast('Settings saved!');
+      loadFeed();
+    }
+  } catch (err) {
+    showToast('Failed to save settings.');
+  }
+}
+
+// ============================================================
+// Video Card Component
+// ============================================================
 function createVideoCard(video) {
+  const card = document.createElement('div');
+  card.className = 'video-card';
+  card.addEventListener('click', () => openWatch(video));
+
   const scores = video.agent_scores || {};
   const shield = scores.shield_score || 0;
-  const card = document.createElement("div");
-  card.className = "video-card";
+  const thumb = video.thumbnail_url || video.thumbnail || `https://img.youtube.com/vi/${video.video_id}/mqdefault.jpg`;
+  const dur = formatDuration(video.duration_seconds || 0);
+  const channel = video.channel_name || video.channel || '';
+  const views = formatCount(video.view_count || 0);
+  const initial = channel ? channel[0].toUpperCase() : '?';
+
+  const badgeClass = shield >= 0.65 ? 'green' : shield >= 0.4 ? 'amber' : 'red';
+
   card.innerHTML = `
     <div class="card-thumbnail">
-      <img src="${getThumbnail(video)}" alt="" loading="lazy" 
-           onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 320 180%22%3E%3Crect width=%22320%22 height=%22180%22 fill=%22%23e0e0e0%22/%3E%3Ctext x=%22160%22 y=%2296%22 text-anchor=%22middle%22 fill=%22%23999%22 font-size=%2214%22%3ENo thumbnail%3C/text%3E%3C/svg%3E'" />
-      ${video.duration_seconds ? `<span class="card-duration">${formatDuration(video.duration_seconds)}</span>` : ""}
-      <div class="card-shield-badge ${scoreColor(shield)}">${scoreLabel(shield)}</div>
+      <img src="${escapeHtml(thumb)}" alt="${escapeHtml(video.title || '')}" loading="lazy" />
+      <span class="card-duration">${dur}</span>
+      <span class="card-shield-badge ${badgeClass}">${Math.round(shield * 100)}</span>
     </div>
-    <div class="card-body">
-      <div class="card-title">${escapeHtml(video.title || "Untitled")}</div>
-      <div class="card-channel">${escapeHtml(video.channel_title || video.channel_name || video.channel || "")}</div>
-      <div class="card-scores">
-        ${makeTag("Credibility", scores.credibility)}
-        ${makeTag("Clickbait", scores.clickbait, true)}
-        ${makeTag("Info", scores.info_density)}
+    <div class="card-meta">
+      <div class="card-avatar">${initial}</div>
+      <div class="card-info">
+        <div class="card-title">${escapeHtml(video.title || '')}</div>
+        <div class="card-channel">${escapeHtml(channel)}</div>
+        <div class="card-stats">${views} views &middot; ${video.topic || ''}</div>
       </div>
     </div>
   `;
-  card.addEventListener("click", () => openVideoModal(video));
+
   return card;
 }
 
-function makeTag(label, score, inverted = false) {
-  if (score === undefined) return "";
-  const val = Math.round(score * 100);
-  let color;
-  if (inverted) {
-    color = score <= 0.3 ? "green" : score <= 0.6 ? "amber" : "red";
-  } else {
-    color = scoreColor(score);
-  }
-  return `<span class="score-tag ${color}">${label} ${val}%</span>`;
+// ============================================================
+// Utilities
+// ============================================================
+function escapeHtml(str) {
+  const el = document.createElement('span');
+  el.textContent = str;
+  return el.innerHTML;
 }
 
-function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
+function pct(val) {
+  return Math.round((val || 0) * 100) + '%';
 }
 
-// -- Video List Item for YOUTUBE column (shows view count, likes, subs) --
-function createYouTubeListItem(video, rank) {
-  const item = document.createElement("div");
-  item.className = "video-list-item";
-  const views = video.view_count || 0;
-  const likes = video.like_count || 0;
-  const subs = video.subscriber_count || 0;
-  const channel = video.channel_title || video.channel_name || video.channel || "";
-  item.innerHTML = `
-    <div class="list-thumbnail">
-      <img src="${getThumbnail(video)}" alt="" loading="lazy"
-           onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 160 90%22%3E%3Crect width=%22160%22 height=%2290%22 fill=%22%23e0e0e0%22/%3E%3C/svg%3E'" />
-    </div>
-    <div class="list-info">
-      <div class="list-title">${rank ? `#${rank} ` : ""}${escapeHtml(video.title || "Untitled")}</div>
-      <div class="list-channel">${escapeHtml(channel)}${video.duration_seconds ? ` · ${formatDuration(video.duration_seconds)}` : ""}</div>
-      <div class="list-scores">
-        <span class="score-tag yt-views">${formatCount(views)} views</span>
-        <span class="score-tag yt-likes">${formatCount(likes)} likes</span>
-        <span class="score-tag yt-subs">${formatCount(subs)} subs</span>
-      </div>
-    </div>
-  `;
-  item.addEventListener("click", () => openVideoModal(video));
-  return item;
+function formatDuration(seconds) {
+  if (!seconds) return '0:00';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-// -- Video List Item for SHIELD column (shows agent scores) --
-function createShieldListItem(video, rank) {
-  const scores = video.agent_scores || {};
-  const shield = scores.shield_score || 0;
-  const channel = video.channel_title || video.channel_name || video.channel || "";
-  const item = document.createElement("div");
-  item.className = "video-list-item";
-  item.innerHTML = `
-    <div class="list-thumbnail">
-      <img src="${getThumbnail(video)}" alt="" loading="lazy"
-           onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 160 90%22%3E%3Crect width=%22160%22 height=%2290%22 fill=%22%23e0e0e0%22/%3E%3C/svg%3E'" />
-    </div>
-    <div class="list-info">
-      <div class="list-title">${rank ? `#${rank} ` : ""}${escapeHtml(video.title || "Untitled")}</div>
-      <div class="list-channel">${escapeHtml(channel)}${video.duration_seconds ? ` · ${formatDuration(video.duration_seconds)}` : ""}</div>
-      <div class="list-scores">
-        <span class="score-tag ${scoreColor(shield)}">Shield ${scoreLabel(shield)}</span>
-        ${makeTag("Cred", scores.credibility)}
-        ${makeTag("CB", scores.clickbait, true)}
-        ${makeTag("Info", scores.info_density)}
-      </div>
-    </div>
-  `;
-  item.addEventListener("click", () => openVideoModal(video));
-  return item;
+function formatCount(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
 }
 
-// -- Generic list item (for history) --
-function createVideoListItem(video, rank) {
-  return createShieldListItem(video, rank);
+function scoreColor(val) {
+  val = val || 0;
+  if (val >= 0.65) return 'green';
+  if (val >= 0.4) return 'amber';
+  return 'red';
 }
 
-// -- Video Modal --
-let _currentModalVideo = null;
-
-function openVideoModal(video) {
-  _currentModalVideo = video;
-  const modal = $("#video-modal");
-  const scores = video.agent_scores || {};
-
-  // Player
-  const videoId = video.video_id || "";
-  $("#modal-player").innerHTML = `
-    <iframe src="https://www.youtube.com/embed/${videoId}?autoplay=1" 
-            allow="autoplay; encrypted-media" allowfullscreen></iframe>
-  `;
-
-  $("#modal-title").textContent = video.title || "Untitled";
-  $("#modal-channel").textContent = video.channel_title || video.channel_name || video.channel || "";
-  $("#modal-description").textContent = video.description || "No description available.";
-
-  // Scores
-  const scoresEl = $("#modal-scores");
-  scoresEl.innerHTML = "";
-  const scoreItems = [
-    { key: "shield_score", label: "Shield Score", value: scores.shield_score },
-    { key: "credibility", label: "Credibility", value: scores.credibility },
-    { key: "info_density", label: "Info Density", value: scores.info_density },
-    { key: "clickbait", label: "Clickbait", value: scores.clickbait, inverted: true },
-    { key: "emotional_manipulation", label: "Emotion", value: scores.emotional_manipulation, inverted: true },
-    { key: "goal_alignment", label: "Relevance", value: scores.goal_alignment },
-  ];
-
-  scoreItems.forEach((s) => {
-    if (s.value === undefined) return;
-    const val = Math.round(s.value * 100);
-    const color = s.inverted ? (s.value <= 0.3 ? "green" : s.value <= 0.6 ? "amber" : "red") : scoreColor(s.value);
-    const el = document.createElement("div");
-    el.className = "modal-score-item";
-    el.innerHTML = `
-      <div class="modal-score-value" style="color: var(--${color})">${val}</div>
-      <div class="modal-score-label">${s.label}</div>
-    `;
-    scoresEl.appendChild(el);
-  });
-
-  // Reset explanation
-  const explainEl = $("#modal-explanation");
-  explainEl.textContent = "";
-  explainEl.classList.add("hidden");
-  const explainBtn = $("#explain-btn");
-  explainBtn.textContent = "Why this score?";
-  explainBtn.disabled = false;
-  explainBtn.classList.remove("hidden");
-
-  // Watch button
-  const watchBtn = $("#modal-watch-btn");
-  watchBtn.onclick = () => logWatch(video);
-
-  modal.classList.remove("hidden");
+function cbColor(val) {
+  val = val || 0;
+  if (val <= 0.3) return 'green';
+  if (val <= 0.6) return 'amber';
+  return 'red';
 }
 
-async function explainCurrentVideo() {
-  if (!_currentModalVideo) return;
-  const btn = $("#explain-btn");
-  const explainEl = $("#modal-explanation");
-
-  btn.textContent = "Thinking...";
-  btn.disabled = true;
-  explainEl.classList.remove("hidden");
-  explainEl.textContent = "Generating explanation...";
-
-  const video = _currentModalVideo;
-  const data = await apiFetch("/api/explain", {
-    method: "POST",
-    body: JSON.stringify({
-      title: video.title || "",
-      channel: video.channel_title || video.channel_name || video.channel || "",
-      description: (video.description || "").slice(0, 500),
-      agent_scores: video.agent_scores || {},
-      query: lastSearchQuery,
-    }),
-  });
-
-  if (data && data.explanation) {
-    explainEl.textContent = data.explanation;
-    btn.textContent = "Explanation generated";
-  } else {
-    explainEl.textContent = "Could not generate explanation. Please try again.";
-    btn.textContent = "Why this score?";
-    btn.disabled = false;
-  }
+function scoreHex(val) {
+  val = val || 0;
+  if (val >= 0.65) return '#3ccf4e';
+  if (val >= 0.4) return '#f5c518';
+  return '#ff4e45';
 }
 
-function closeModal() {
-  const modal = $("#video-modal");
-  modal.classList.add("hidden");
-  $("#modal-player").innerHTML = "";
-  _currentModalVideo = null;
+function cbHex(val) {
+  val = val || 0;
+  if (val <= 0.3) return '#3ccf4e';
+  if (val <= 0.6) return '#f5c518';
+  return '#ff4e45';
 }
-
-// -- Search --
-async function performSearch() {
-  const query = $("#search-input").value.trim();
-  if (!query) return;
-
-  lastSearchQuery = query; // Sync to compare tab
-
-  const timeBudget = parseInt($("#time-budget").value);
-  const qualityPref = $("#quality-pref").value;
-  const maxResults = parseInt($("#max-results").value);
-
-  // Show loading
-  $("#search-results").innerHTML = "";
-  $("#search-loading").classList.remove("hidden");
-  $("#search-metrics").classList.add("hidden");
-  $("#search-empty").classList.add("hidden");
-
-  const data = await apiFetch("/api/search", {
-    method: "POST",
-    body: JSON.stringify({
-      query,
-      max_results: maxResults,
-      time_budget_minutes: timeBudget,
-      quality_preference: qualityPref,
-    }),
-  });
-
-  $("#search-loading").classList.add("hidden");
-
-  if (!data || !data.videos || data.videos.length === 0) {
-    $("#search-empty").classList.remove("hidden");
-    return;
-  }
-
-  // Metrics
-  const m = data.metrics || {};
-  $("#metric-results").textContent = m.total_results || 0;
-  $("#metric-shield").textContent = m.avg_shield_score || 0;
-  $("#metric-clickbait").textContent = m.avg_clickbait || 0;
-  $("#metric-credibility").textContent = m.avg_credibility || 0;
-  $("#metric-time").textContent = `${data.elapsed_ms || 0}ms`;
-  $("#search-metrics").classList.remove("hidden");
-
-  // Render cards
-  const grid = $("#search-results");
-  data.videos.forEach((v) => grid.appendChild(createVideoCard(v)));
-}
-
-// -- Compare --
-async function performCompare() {
-  const query = $("#compare-input").value.trim();
-  if (!query) return;
-
-  lastSearchQuery = query; // Keep in sync
-
-  $("#compare-loading").classList.remove("hidden");
-  $("#compare-container").classList.add("hidden");
-
-  const data = await apiFetch("/api/compare", {
-    method: "POST",
-    body: JSON.stringify({ query, max_results: 15 }),
-  });
-
-  $("#compare-loading").classList.add("hidden");
-  if (!data) return;
-
-  $("#compare-container").classList.remove("hidden");
-
-  // YouTube side - show view count, likes, subs
-  const ytMetrics = data.youtube?.metrics || {};
-  $("#youtube-metrics").innerHTML = `
-    <div class="compare-metric">
-      <div class="compare-metric-value">${ytMetrics.avg_clickbait || 0}</div>
-      <div class="compare-metric-label">Avg Clickbait</div>
-    </div>
-    <div class="compare-metric">
-      <div class="compare-metric-value">${ytMetrics.avg_credibility || 0}</div>
-      <div class="compare-metric-label">Avg Credibility</div>
-    </div>
-    <div class="compare-metric">
-      <div class="compare-metric-value">${ytMetrics.avg_shield_score || 0}</div>
-      <div class="compare-metric-label">Avg Shield</div>
-    </div>
-  `;
-  const ytList = $("#youtube-results");
-  ytList.innerHTML = "";
-  (data.youtube?.videos || []).forEach((v, i) =>
-    ytList.appendChild(createYouTubeListItem(v, i + 1))
-  );
-
-  // Shield side - show agent scores
-  const shMetrics = data.shield?.metrics || {};
-  $("#shield-metrics").innerHTML = `
-    <div class="compare-metric">
-      <div class="compare-metric-value" style="color: var(--green)">${shMetrics.avg_shield_score || 0}</div>
-      <div class="compare-metric-label">Avg Shield</div>
-    </div>
-    <div class="compare-metric">
-      <div class="compare-metric-value">${shMetrics.avg_clickbait || 0}</div>
-      <div class="compare-metric-label">Avg Clickbait</div>
-    </div>
-    <div class="compare-metric">
-      <div class="compare-metric-value">${shMetrics.avg_credibility || 0}</div>
-      <div class="compare-metric-label">Avg Credibility</div>
-    </div>
-  `;
-  const shList = $("#shield-results");
-  shList.innerHTML = "";
-  (data.shield?.videos || []).forEach((v, i) =>
-    shList.appendChild(createShieldListItem(v, i + 1))
-  );
-}
-
-// -- Profile --
-function renderProfile() {
-  if (currentUser) {
-    $("#profile-avatar").textContent = currentUser.name[0].toUpperCase();
-    $("#profile-name").textContent = currentUser.name;
-    $("#profile-joined").textContent = `Joined ${new Date(currentUser.created_at).toLocaleDateString()}`;
-    $("#profile-setup").classList.add("hidden");
-    $("#profile-prefs").classList.remove("hidden");
-    $("#history-section").classList.remove("hidden");
-    $("#recommend-section").classList.remove("hidden");
-    loadHistory();
-    loadRecommendations();
-  } else {
-    $("#profile-avatar").textContent = "?";
-    $("#profile-name").textContent = "Guest";
-    $("#profile-joined").textContent = "Not signed in";
-    $("#profile-setup").classList.remove("hidden");
-    $("#profile-prefs").classList.add("hidden");
-    $("#history-section").classList.add("hidden");
-    $("#recommend-section").classList.add("hidden");
-  }
-  updateUserBadge();
-}
-
-async function createUserProfile() {
-  const name = $("#new-user-name").value.trim();
-  if (!name) return;
-
-  const user = await apiFetch("/api/users", {
-    method: "POST",
-    body: JSON.stringify({ name }),
-  });
-
-  if (user) {
-    currentUser = user;
-    localStorage.setItem("shield_user", JSON.stringify(user));
-    renderProfile();
-  }
-}
-
-async function loadHistory() {
-  if (!currentUser) return;
-
-  const history = await apiFetch(`/api/users/${currentUser.id}/history?limit=20`);
-  const list = $("#history-list");
-  const empty = $("#history-empty");
-  list.innerHTML = "";
-
-  if (!history || history.length === 0) {
-    empty.classList.remove("hidden");
-    return;
-  }
-
-  empty.classList.add("hidden");
-  history.forEach((h) => {
-    const item = createVideoListItem({
-      video_id: h.video_id,
-      title: h.title,
-      channel: h.channel,
-      thumbnail: h.thumbnail,
-      duration_seconds: h.duration_seconds,
-      agent_scores: h.agent_scores,
-    });
-    list.appendChild(item);
-  });
-}
-
-async function loadRecommendations() {
-  if (!currentUser) return;
-
-  const data = await apiFetch(`/api/users/${currentUser.id}/recommend?top_k=8`);
-  const grid = $("#recommend-grid");
-  grid.innerHTML = "";
-
-  if (!data || !data.recommendations || data.recommendations.length === 0) {
-    grid.innerHTML = '<div class="empty-state"><p>Watch some videos first to get personalized recommendations.</p></div>';
-    return;
-  }
-
-  data.recommendations.forEach((v) => grid.appendChild(createVideoCard(v)));
-}
-
-async function logWatch(video) {
-  if (!currentUser) {
-    alert("Create a profile first to track your watch history!");
-    return;
-  }
-
-  const scores = video.agent_scores || {};
-  await apiFetch(`/api/users/${currentUser.id}/history`, {
-    method: "POST",
-    body: JSON.stringify({
-      video_id: video.video_id || "",
-      title: video.title || "",
-      channel: video.channel_title || video.channel_name || video.channel || "",
-      thumbnail: getThumbnail(video),
-      duration_seconds: video.duration_seconds || 0,
-      watch_pct: 1.0,
-      agent_scores: scores,
-    }),
-  });
-
-  // Visual feedback
-  const btn = $("#modal-watch-btn");
-  btn.textContent = "Marked as watched!";
-  btn.style.background = "var(--green)";
-  setTimeout(() => {
-    btn.innerHTML = `
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-      Mark as Watched
-    `;
-    btn.style.background = "";
-  }, 2000);
-}
-
-function updateUserBadge() {
-  if (currentUser) {
-    $("#user-avatar").textContent = currentUser.name[0].toUpperCase();
-    $("#user-name-display").textContent = currentUser.name;
-  } else {
-    $("#user-avatar").textContent = "?";
-    $("#user-name-display").textContent = "Guest";
-  }
-}
-
-async function savePreferences() {
-  if (!currentUser) return;
-  const style = $("#pref-style").value;
-  await apiFetch(`/api/users/${currentUser.id}/prefs`, {
-    method: "PUT",
-    body: JSON.stringify({ preferences: { style } }),
-  });
-  currentUser.preferences = { style };
-  localStorage.setItem("shield_user", JSON.stringify(currentUser));
-}
-
-// -- Event Listeners --
-document.addEventListener("DOMContentLoaded", () => {
-  // Navigation
-  $$(".nav-link").forEach((link) => {
-    link.addEventListener("click", () => navigateTo(link.dataset.page));
-  });
-
-  $("#logo-link").addEventListener("click", (e) => {
-    e.preventDefault();
-    navigateTo("search");
-  });
-
-  // User badge -> profile
-  $("#user-badge").addEventListener("click", () => navigateTo("profile"));
-
-  // Search
-  $("#search-btn").addEventListener("click", performSearch);
-  $("#search-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") performSearch();
-  });
-
-  // Compare
-  $("#compare-btn").addEventListener("click", performCompare);
-  $("#compare-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") performCompare();
-  });
-
-  // Profile
-  $("#create-user-btn").addEventListener("click", createUserProfile);
-  $("#save-prefs-btn").addEventListener("click", savePreferences);
-
-  // Modal
-  $("#modal-close").addEventListener("click", closeModal);
-  $("#video-modal").addEventListener("click", (e) => {
-    if (e.target === $("#video-modal")) closeModal();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeModal();
-  });
-
-  // Explain button
-  $("#explain-btn").addEventListener("click", explainCurrentVideo);
-
-  // Init
-  updateUserBadge();
-});
