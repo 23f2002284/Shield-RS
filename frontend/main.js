@@ -421,7 +421,7 @@ async function loadFeed() {
   const filterBar = document.getElementById('topic-filter-bar');
 
   try {
-    let url = `${API}/feed?limit=60`;
+    let url = `${API}/feed?limit=2000`;
     if (currentUser) {
       url += `&user_id=${currentUser.id}`;
     }

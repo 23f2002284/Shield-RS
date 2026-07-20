@@ -390,16 +390,36 @@ def search(req: SearchRequest):
     print(f"\n[Search] Query: '{req.query}' | max={req.max_results}")
 
     raw_results = search_youtube(req.query, max_results=req.max_results)
-    if not raw_results:
-        # Fallback: search catalog
+    
+    # If we hit a rate limit or got too few results, supplement with the catalog
+    if len(raw_results) < req.max_results:
         catalog = _load_scored_catalog()
         q_lower = req.query.lower()
-        raw_results = [
-            v for v in catalog.get("videos", [])
-            if q_lower in v.get("title", "").lower()
-            or q_lower in v.get("description", "").lower()
-            or q_lower in v.get("topic", "").lower()
-        ][:req.max_results]
+        q_words = [w for w in q_lower.split() if len(w) > 3]
+        existing_ids = {v.get("video_id") for v in raw_results}
+        
+        # 1. Exact match
+        for v in catalog.get("videos", []):
+            if len(raw_results) >= req.max_results: break
+            if v.get("video_id") not in existing_ids and (
+                q_lower in v.get("title", "").lower()
+                or q_lower in v.get("description", "").lower()
+                or q_lower in v.get("topic", "").lower()
+            ):
+                raw_results.append(v)
+                existing_ids.add(v.get("video_id"))
+                
+        # 2. Strict Loose match (requires ALL keywords to be present)
+        if len(raw_results) < req.max_results and q_words:
+            for v in catalog.get("videos", []):
+                if len(raw_results) >= req.max_results: break
+                if v.get("video_id") not in existing_ids:
+                    text = (v.get("title", "") + " " + v.get("description", "") + " " + v.get("topic", "")).lower()
+                    if all(k in text for k in q_words):
+                        raw_results.append(v)
+                        existing_ids.add(v.get("video_id"))
+                        
+        raw_results = raw_results[:req.max_results]
 
     if not raw_results:
         return {"videos": [], "metrics": {}, "elapsed_ms": 0}
@@ -437,23 +457,52 @@ def compare(req: SearchRequest):
     """Side-by-side: YouTube ranking vs Shield ranking."""
     t0 = time.time()
 
-    raw_results = search_youtube(req.query, max_results=req.max_results)
-    if not raw_results:
+    # Fetch a larger pool to allow meaningful top-N comparison
+    pool_size = max(req.max_results * 3, 50)
+    raw_results = search_youtube(req.query, max_results=pool_size)
+    
+    if len(raw_results) < pool_size:
         catalog = _load_scored_catalog()
         q_lower = req.query.lower()
-        raw_results = [
-            v for v in catalog.get("videos", [])
-            if q_lower in v.get("title", "").lower()
-            or q_lower in v.get("description", "").lower()
-            or q_lower in v.get("topic", "").lower()
-        ][:req.max_results]
+        q_words = [w for w in q_lower.split() if len(w) > 3]
+        existing_ids = {v.get("video_id") for v in raw_results}
+        
+        # 1. Exact match
+        for v in catalog.get("videos", []):
+            if len(raw_results) >= pool_size: break
+            if v.get("video_id") not in existing_ids and (
+                q_lower in v.get("title", "").lower()
+                or q_lower in v.get("description", "").lower()
+                or q_lower in v.get("topic", "").lower()
+            ):
+                raw_results.append(v)
+                existing_ids.add(v.get("video_id"))
+                
+        # 2. Strict Loose match (requires ALL keywords to be present)
+        if len(raw_results) < pool_size and q_words:
+            for v in catalog.get("videos", []):
+                if len(raw_results) >= pool_size: break
+                if v.get("video_id") not in existing_ids:
+                    text = (v.get("title", "") + " " + v.get("description", "") + " " + v.get("topic", "")).lower()
+                    if all(k in text for k in q_words):
+                        raw_results.append(v)
+                        existing_ids.add(v.get("video_id"))
+                        
+        raw_results = raw_results[:pool_size]
 
     scored = [score_video(v.copy(), user_goal=req.query) for v in raw_results]
 
     youtube_ranked = sorted(scored, key=lambda v: v.get("view_count", 0), reverse=True)
     shield_ranked = sorted(scored, key=lambda v: v.get("agent_scores", {}).get("shield_score", 0), reverse=True)
+    
+    # We limit to at most max_results, but if the pool is very small, we halve it so the lists aren't identical.
+    compare_limit = min(req.max_results, max(1, len(scored) // 2))
+    
+    youtube_ranked = youtube_ranked[:compare_limit]
+    shield_ranked = shield_ranked[:compare_limit]
 
     def avg_m(vids, key):
+        if not vids: return 0
         vals = [v.get("agent_scores", {}).get(key, 0) for v in vids]
         return round(sum(vals) / max(len(vals), 1), 3)
 
