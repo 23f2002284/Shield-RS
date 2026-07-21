@@ -23,17 +23,17 @@ TOPICS = [
 ]
 
 def main():
-    os.makedirs(os.path.join("data", "scrapes"), exist_ok=True)
+    os.makedirs(os.path.join("data", "scrape"), exist_ok=True)
     
     for topic in TOPICS:
         safe_name = topic.replace(" ", "_")
-        raw_output = os.path.join("data", "scrapes", f"{safe_name}_raw.json")
+        raw_output = os.path.join("data", "scrape", f"{safe_name}_final.json")
         
         print(f"=== Scraping metadata for: '{topic}' ===")
         subprocess.run([
             sys.executable, "-m", "src.scraper.youtube_scraper",
             "--query", topic,
-            "--max_results", "50",
+            "--max_results", "200",
             "--output", raw_output
         ], check=True)
         print(f"=== Completed: '{topic}' ===\n")

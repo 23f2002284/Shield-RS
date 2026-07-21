@@ -197,7 +197,27 @@ function restoreSession() {
     try {
       currentUser = JSON.parse(saved);
       updateAuthUI();
+      // Asynchronously verify that the user still exists in the backend
+      verifySession(currentUser.id);
     } catch { currentUser = null; }
+  }
+}
+
+async function verifySession(userId) {
+  try {
+    const res = await fetch(`${API}/users/${userId}`);
+    if (!res.ok && res.status === 404) {
+      console.warn('Cached user not found on backend. Clearing session.');
+      clearSession();
+      showToast('Session expired. Please sign in again.');
+      
+      // If we are currently on a page that requires auth, redirect home or refresh UI
+      if (['history', 'settings'].includes(currentPage)) {
+        navigateTo('home');
+      }
+    }
+  } catch (err) {
+    console.error('Failed to verify session:', err);
   }
 }
 
@@ -514,6 +534,30 @@ function setupSearch() {
     if (e.key === 'Escape') suggestionsEl.classList.add('hidden');
   });
 
+  // Advanced Options UI Logic
+  const filterBtn = document.getElementById('global-search-filter-btn');
+  const advPanel = document.getElementById('advanced-search-panel');
+  const maxInput = document.getElementById('adv-search-max');
+  const maxSpan = document.getElementById('adv-max-val');
+  const timeInput = document.getElementById('adv-search-time');
+  const timeSpan = document.getElementById('adv-time-val');
+
+  filterBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Hide suggestions when toggling options
+    suggestionsEl.classList.add('hidden');
+    
+    const isHidden = advPanel.classList.toggle('hidden');
+    if (!isHidden) {
+      filterBtn.classList.add('active');
+    } else {
+      filterBtn.classList.remove('active');
+    }
+  });
+
+  maxInput.addEventListener('input', () => maxSpan.textContent = maxInput.value);
+  timeInput.addEventListener('input', () => timeSpan.textContent = timeInput.value);
+
   // Dynamic suggestions on focus/input
   input.addEventListener('focus', () => showSuggestions(input.value));
   input.addEventListener('input', () => showSuggestions(input.value));
@@ -522,6 +566,8 @@ function setupSearch() {
   document.addEventListener('click', (e) => {
     if (!e.target.closest('.topbar-search-wrapper')) {
       suggestionsEl.classList.add('hidden');
+      advPanel.classList.add('hidden');
+      filterBtn.classList.remove('active');
     }
   });
 }
@@ -587,6 +633,14 @@ function showSuggestions(query) {
   });
 
   suggestionsEl.classList.remove('hidden');
+  
+  // Hide advanced panel if showing suggestions
+  const advPanel = document.getElementById('advanced-search-panel');
+  const filterBtn = document.getElementById('global-search-filter-btn');
+  if (advPanel && !advPanel.classList.contains('hidden')) {
+    advPanel.classList.add('hidden');
+    if (filterBtn) filterBtn.classList.remove('active');
+  }
 }
 
 async function performSearch(query) {
@@ -606,11 +660,25 @@ async function performSearch(query) {
   const compareInput = document.getElementById('compare-input');
   if (compareInput) compareInput.value = query;
 
+  // Read advanced constraints
+  const maxVideos = parseInt(document.getElementById('adv-search-max')?.value || 20, 10);
+  const timeBudget = parseInt(document.getElementById('adv-search-time')?.value || 60, 10);
+  const qualityPref = document.getElementById('adv-search-pref')?.value || 'balanced';
+
+  // Hide advanced panel if open
+  document.getElementById('advanced-search-panel')?.classList.add('hidden');
+  document.getElementById('global-search-filter-btn')?.classList.remove('active');
+
   try {
     const res = await fetch(`${API}/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, max_results: 20 }),
+      body: JSON.stringify({ 
+        query, 
+        max_results: maxVideos,
+        time_budget_minutes: timeBudget,
+        quality_preference: qualityPref
+      }),
     });
     const data = await res.json();
 
@@ -883,6 +951,16 @@ async function loadHistory() {
 
   try {
     const res = await fetch(`${API}/users/${currentUser.id}/history?limit=30`);
+    if (!res.ok) {
+        if (res.status === 404) {
+            clearSession();
+            grid.innerHTML = '';
+            empty.classList.remove('hidden');
+            empty.querySelector('p').textContent = 'Session expired. Please sign in again.';
+            return;
+        }
+        throw new Error('Failed to load history');
+    }
     const history = await res.json();
 
     if (!history || history.length === 0) {

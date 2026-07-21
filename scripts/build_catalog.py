@@ -175,17 +175,17 @@ def generate_explanations(videos: list[dict], topic_query: str, batch_size: int 
 
 
 def load_existing_scrapes() -> dict[str, list[dict]]:
-    """Load any existing scraped data from data/scrapes/."""
-    scrapes_dir = PROJECT_ROOT / "data" / "scrapes"
+    """Load any existing scraped data from data/scrape/."""
+    scrapes_dir = PROJECT_ROOT / "data" / "scrape"
     existing = {}
     if not scrapes_dir.exists():
         return existing
 
-    for f in scrapes_dir.glob("*_final.json"):
+    for f in scrapes_dir.glob("*.json"):
         try:
             with open(f, encoding="utf-8") as fp:
                 videos = json.load(fp)
-            key = f.stem.replace("_final", "")
+            key = f.stem.replace("_final", "").replace("_raw", "")
             existing[key] = videos
             print(f"  [CACHE] Loaded {len(videos)} existing videos for '{key}'")
         except Exception:
@@ -224,7 +224,16 @@ def main():
     existing = load_existing_scrapes()
 
     all_videos = []
-    topics_to_process = TOPICS[:args.topics]
+    if existing:
+        topics_to_process = []
+        for key in existing.keys():
+            topics_to_process.append({
+                "key": key,
+                "query": key.replace("_", " "),
+                "label": key.replace("_", " ").title()
+            })
+    else:
+        topics_to_process = TOPICS[:args.topics]
 
     for idx, topic in enumerate(topics_to_process):
         print(f"\n[{idx+1}/{len(topics_to_process)}] {topic['label']} ({topic['key']})")

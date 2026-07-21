@@ -164,7 +164,7 @@ def _ensure_models():
     print(f"[Shield] Models ready in {time.time()-t0:.1f}s")
 
 
-def score_video(video: dict, user_goal: str = "") -> dict:
+def score_video(video: dict, user_goal: str = "", quality_preference: str = "balanced") -> dict:
     """Score a single video with the full agent pipeline."""
     _ensure_models()
 
@@ -218,15 +218,27 @@ def score_video(video: dict, user_goal: str = "") -> dict:
         except Exception:
             ga_score = 0.5
 
+    # Base weights (balanced)
+    w_cr, w_id, w_ga, w_cb, w_em = 0.20, 0.20, 0.15, -0.30, -0.15
+    
+    if quality_preference == "scientific":
+        w_cr, w_id, w_ga, w_cb, w_em = 0.35, 0.30, 0.10, -0.20, -0.05
+    elif quality_preference == "strict":
+        w_cr, w_id, w_ga, w_cb, w_em = 0.20, 0.10, 0.10, -0.40, -0.20
+    elif quality_preference == "relaxed":
+        w_cr, w_id, w_ga, w_cb, w_em = 0.10, 0.10, 0.20, -0.10, -0.05
+
     # Shield composite score
     shield_score = (
-        0.20 * cr_score
-        + 0.20 * id_score
-        + 0.15 * ga_score
-        - 0.30 * cb_score
-        - 0.15 * em_score
+        w_cr * cr_score
+        + w_id * id_score
+        + w_ga * ga_score
+        + w_cb * cb_score
+        + w_em * em_score
     )
-    shield_score = max(0.0, min(1.0, (shield_score + 0.45) / 1.0))
+    # Normalize approximately
+    base_shift = abs(w_cb) + abs(w_em)
+    shield_score = max(0.0, min(1.0, (shield_score + base_shift) / 1.0))
 
     video["agent_scores"] = {
         "shield_score": round(shield_score, 3),
@@ -424,23 +436,36 @@ def search(req: SearchRequest):
     if not raw_results:
         return {"videos": [], "metrics": {}, "elapsed_ms": 0}
 
-    scored = [score_video(v.copy(), user_goal=req.query) for v in raw_results]
+    scored = [score_video(v.copy(), user_goal=req.query, quality_preference=req.quality_preference) for v in raw_results]
     scored.sort(key=lambda v: v.get("agent_scores", {}).get("shield_score", 0), reverse=True)
+
+    # Enforce time budget (max duration)
+    budget_seconds = req.time_budget_minutes * 60
+    final_scored = []
+    current_seconds = 0
+    for v in scored:
+        dur = v.get("duration_seconds", 0)
+        # We always include at least one video if none exist yet, or if it fits the budget
+        if current_seconds + dur <= budget_seconds or len(final_scored) == 0:
+            final_scored.append(v)
+            current_seconds += dur
+        if current_seconds >= budget_seconds:
+            break
 
     elapsed = int((time.time() - t0) * 1000)
 
-    if scored:
-        avg_shield = sum(v["agent_scores"]["shield_score"] for v in scored) / len(scored)
-        avg_cb = sum(v["agent_scores"]["clickbait"] for v in scored) / len(scored)
-        avg_cred = sum(v["agent_scores"]["credibility"] for v in scored) / len(scored)
-        total_dur = sum(v.get("duration_seconds", 0) for v in scored)
+    if final_scored:
+        avg_shield = sum(v["agent_scores"]["shield_score"] for v in final_scored) / len(final_scored)
+        avg_cb = sum(v["agent_scores"]["clickbait"] for v in final_scored) / len(final_scored)
+        avg_cred = sum(v["agent_scores"]["credibility"] for v in final_scored) / len(final_scored)
+        total_dur = sum(v.get("duration_seconds", 0) for v in final_scored)
     else:
         avg_shield = avg_cb = avg_cred = total_dur = 0
 
     return {
-        "videos": scored,
+        "videos": final_scored,
         "metrics": {
-            "total_results": len(scored),
+            "total_results": len(final_scored),
             "avg_shield_score": round(avg_shield, 3),
             "avg_clickbait": round(avg_cb, 3),
             "avg_credibility": round(avg_cred, 3),
