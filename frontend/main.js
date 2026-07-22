@@ -76,6 +76,8 @@ window.addEventListener('popstate', (e) => {
             else navigateTo('home', false);
           }).catch(() => navigateTo('home', false));
       }
+    } else if (e.state.page === 'topic' && e.state.topic) {
+      navigateTo('topic', false, e.state.topic);
     } else {
       navigateTo(e.state.page, false);
     }
@@ -103,6 +105,13 @@ async function handleUrlRoute(pushStateFlag = true) {
       }
     }
     navigateTo('home', pushStateFlag);
+  } else if (path.startsWith('/topic/')) {
+    const topicParam = decodeURIComponent(path.split('/topic/')[1]);
+    if (topicParam) {
+      navigateTo('topic', pushStateFlag, topicParam);
+    } else {
+      navigateTo('home', pushStateFlag);
+    }
   } else if (path === '/trending') {
     navigateTo('trending', pushStateFlag);
   } else if (path === '/history') {
@@ -373,31 +382,44 @@ function setupNav() {
   });
 }
 
-function navigateTo(page, pushStateFlag = true) {
+function navigateTo(page, pushStateFlag = true, param = null) {
   // ── STOP VIDEO when leaving watch page ──
   if (currentPage === 'watch' && page !== 'watch') {
     destroyYTPlayer();
   }
 
+  // Scroll to top
+  window.scrollTo(0, 0);
+
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.sidebar-item').forEach(b => b.classList.remove('active'));
 
-  const pageEl = document.getElementById(`page-${page}`);
+  const actualPage = page === 'topic' ? 'home' : page;
+  
+  const pageEl = document.getElementById(`page-${actualPage}`);
   if (pageEl) pageEl.classList.add('active');
 
-  const navEl = document.getElementById(`nav-${page}`);
+  const navEl = document.getElementById(`nav-${actualPage}`);
   if (navEl) navEl.classList.add('active');
 
-  currentPage = page;
+  currentPage = actualPage;
 
   if (pushStateFlag) {
     if (page === 'home') {
       history.pushState({ page: 'home' }, '', '/');
+    } else if (page === 'topic' && param) {
+      history.pushState({ page: 'topic', topic: param }, '', `/topic/${encodeURIComponent(param)}`);
     } else if (page !== 'watch') {
       history.pushState({ page }, '', `/${page}`);
     }
   }
 
+  if (page === 'home' || page === 'topic') {
+    const t = param || 'all';
+    // Update active state of filter chips
+    document.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c.dataset.topic === t));
+    renderFeed(t);
+  }
   if (page === 'trending') loadTrending();
   if (page === 'history') loadHistory();
   if (page === 'settings') loadSettings();
@@ -521,6 +543,85 @@ function setupAuth() {
 }
 
 // ============================================================
+// Infinite Scroller
+// ============================================================
+class InfiniteScroller {
+  constructor(gridId, videos, chunkSize = 24) {
+    this.grid = document.getElementById(gridId);
+    this.videos = videos;
+    this.chunkSize = chunkSize;
+    this.renderedCount = 0;
+    this.observer = null;
+    
+    if (!document.getElementById('spin-keyframes')) {
+      const style = document.createElement('style');
+      style.id = 'spin-keyframes';
+      style.innerHTML = '@keyframes spin { to { transform: rotate(360deg); } }';
+      document.head.appendChild(style);
+    }
+    
+    this.reset();
+  }
+
+  reset() {
+    this.grid.innerHTML = '';
+    this.renderedCount = 0;
+    if (this.observer) this.observer.disconnect();
+    
+    if (this.videos.length === 0) {
+      this.grid.innerHTML = '<div class="empty-state"><p>No videos found.</p></div>';
+      return;
+    }
+    this.loadNext(false);
+  }
+
+  loadNext(withDelay = false) {
+    if (this.observer) {
+      this.observer.disconnect();
+      this.observer = null;
+    }
+    
+    const oldTrigger = this.grid.querySelector('.scroll-loading');
+    
+    const doLoad = () => {
+      if (oldTrigger) oldTrigger.remove();
+      const chunk = this.videos.slice(this.renderedCount, this.renderedCount + this.chunkSize);
+      chunk.forEach(v => {
+        this.grid.appendChild(createVideoCard(v));
+      });
+      this.renderedCount += chunk.length;
+
+      if (this.renderedCount < this.videos.length) {
+        const trigger = document.createElement('div');
+        trigger.className = 'scroll-loading';
+        trigger.style.gridColumn = '1 / -1';
+        trigger.style.display = 'flex';
+        trigger.style.justifyContent = 'center';
+        trigger.style.padding = '20px';
+        trigger.innerHTML = '<div style="width:30px;height:30px;border:3px solid var(--border);border-top-color:var(--primary);border-radius:50%;animation:spin 1s linear infinite;"></div>';
+        this.grid.appendChild(trigger);
+
+        this.observer = new IntersectionObserver((entries) => {
+          if (entries[0].isIntersecting) {
+            this.loadNext(true);
+          }
+        }, { rootMargin: '200px' });
+        this.observer.observe(trigger);
+      }
+    };
+
+    if (withDelay) {
+      setTimeout(doLoad, 600);
+    } else {
+      doLoad();
+    }
+  }
+}
+
+let currentFeedScroller = null;
+let currentSearchScroller = null;
+
+// ============================================================
 // Feed (Home Page)
 // ============================================================
 async function loadFeed() {
@@ -551,30 +652,25 @@ async function loadFeed() {
 
     filterBar.querySelectorAll('.filter-chip').forEach(chip => {
       chip.addEventListener('click', () => {
-        filterBar.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-        chip.classList.add('active');
-        renderFeed(chip.dataset.topic);
+        const t = chip.dataset.topic;
+        if (t === 'all') navigateTo('home');
+        else navigateTo('topic', true, t);
       });
     });
 
-    // Populate sidebar topics
+    // Populate sidebar topics (random subset of 8)
     const sidebarTopics = document.getElementById('sidebar-topics');
     sidebarTopics.innerHTML = '';
-    feedTopics.forEach(topic => {
+    const randomTopics = [...feedTopics].sort(() => 0.5 - Math.random()).slice(0, 8);
+    randomTopics.forEach(topic => {
       const btn = document.createElement('button');
       btn.className = 'sidebar-topic-btn';
       btn.textContent = topic;
       btn.addEventListener('click', () => {
-        filterBar.querySelectorAll('.filter-chip').forEach(c => {
-          c.classList.toggle('active', c.dataset.topic === topic);
-        });
-        navigateTo('home');
-        renderFeed(topic);
+        navigateTo('topic', true, topic);
       });
       sidebarTopics.appendChild(btn);
     });
-
-    renderFeed('all');
   } catch (err) {
     console.error('Feed load failed:', err);
     grid.innerHTML = '<div class="empty-state"><p>Failed to load feed. Is the backend running?</p></div>';
@@ -582,21 +678,16 @@ async function loadFeed() {
 }
 
 function renderFeed(topic) {
-  const grid = document.getElementById('feed-grid');
   let videos = feedCache;
 
   if (topic !== 'all') {
     videos = videos.filter(v => v.topic === topic);
   }
 
-  grid.innerHTML = '';
-  videos.forEach(v => {
-    grid.appendChild(createVideoCard(v));
-  });
-
-  if (videos.length === 0) {
-    grid.innerHTML = '<div class="empty-state"><p>No videos in this category yet.</p></div>';
+  if (currentFeedScroller) {
+    if (currentFeedScroller.observer) currentFeedScroller.observer.disconnect();
   }
+  currentFeedScroller = new InfiniteScroller('feed-grid', videos);
 }
 
 // ============================================================
@@ -787,7 +878,10 @@ async function performSearch(query) {
       <div><span class="compare-metric-label">Total Duration</span><br><span class="compare-metric-value">${m.total_duration_minutes || 0} min</span></div>
     `;
 
-    videos.forEach(v => grid.appendChild(createVideoCard(v)));
+    if (currentSearchScroller) {
+      if (currentSearchScroller.observer) currentSearchScroller.observer.disconnect();
+    }
+    currentSearchScroller = new InfiniteScroller('search-grid', videos);
   } catch (err) {
     loading.classList.add('hidden');
     grid.innerHTML = '<div class="empty-state"><p>Search failed. Check backend connection.</p></div>';

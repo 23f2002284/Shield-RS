@@ -319,7 +319,7 @@ def main():
 
     size_mb = output_path.stat().st_size / (1024 * 1024)
     print(f"\n{'=' * 60}")
-    print(f"✓ Catalog saved: {output_path}")
+    print(f"  [OK] Catalog saved: {output_path}")
     print(f"  Videos: {len(all_videos)} | Size: {size_mb:.1f}MB")
     print(f"  Topics: {len(topics_to_process)}")
 

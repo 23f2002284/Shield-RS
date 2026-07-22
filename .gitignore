@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .env
 data/
+!data/scored_catalog.json
+!data/scrape/
 data.zip
 .DS_Store
 *.log

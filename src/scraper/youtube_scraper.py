@@ -43,6 +43,9 @@ def search_videos(query: str, max_results: int = 200) -> List[str]:
         except HttpError as e:
             print(f"An HTTP error {e.resp.status} occurred: {e.content}")
             break
+        except Exception as e:
+            print(f"A network or system error occurred: {e}")
+            break
             
     print(f"Found {len(video_ids)} video IDs for query '{query}'.")
     return video_ids

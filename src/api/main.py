@@ -89,7 +89,7 @@ def _load_fallback_catalog() -> dict:
     """Fallback: load raw scrapes when no pre-scored catalog exists."""
     global _scored_catalog, _catalog_topics
 
-    scrapes_dir = PROJECT_ROOT / "data" / "scrapes"
+    scrapes_dir = PROJECT_ROOT / "data" / "scrape"
     if not scrapes_dir.exists():
         _scored_catalog = {"videos": [], "topics": []}
         return _scored_catalog
@@ -361,6 +361,12 @@ def get_feed(user_id: Optional[str] = None, topic: Optional[str] = None, limit: 
         key=lambda v: v.get("agent_scores", {}).get("shield_score", 0),
         reverse=True,
     )
+
+    # Randomize top 500 to keep the feed fresh on every reload
+    import random
+    top_tier = videos[:500]
+    random.shuffle(top_tier)
+    videos = top_tier + videos[500:]
 
     # Diversify: don't show 10 videos from the same topic in a row
     diversified = _diversify_feed(videos, max_per_topic_consecutive=3)
