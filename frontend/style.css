@@ -1198,3 +1198,9 @@ img { display: block; max-width: 100%; }
   to { opacity: 1; transform: translateY(0); }
 }
 
+
+.watch-description.expanded {
+  max-height: none;
+  overflow: visible;
+}
+

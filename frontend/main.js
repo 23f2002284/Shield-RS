@@ -54,8 +54,69 @@ document.addEventListener('DOMContentLoaded', () => {
   setupSearch();
   setupCompare();
   setupSettings();
-  loadFeed();
+  loadFeed().then(() => {
+    // Handle URL routing after feed is loaded (so we have cache for watch etc)
+    handleUrlRoute();
+  });
 });
+
+window.addEventListener('popstate', (e) => {
+  if (e.state && e.state.page) {
+    if (e.state.page === 'watch' && e.state.videoId) {
+      // Find video and open it without pushing state again
+      const video = feedCache.find(v => v.video_id === e.state.videoId);
+      if (video) {
+        openWatch(video, false);
+      } else {
+        // Fallback fetch
+        fetch(`${API}/videos/${e.state.videoId}`)
+          .then(r => r.json())
+          .then(v => {
+            if (v && v.video_id) openWatch(v, false);
+            else navigateTo('home', false);
+          }).catch(() => navigateTo('home', false));
+      }
+    } else {
+      navigateTo(e.state.page, false);
+    }
+  } else {
+    // Fallback to URL parsing
+    handleUrlRoute(false);
+  }
+});
+
+async function handleUrlRoute(pushStateFlag = true) {
+  const path = window.location.pathname;
+  if (path.startsWith('/watch')) {
+    const params = new URLSearchParams(window.location.search);
+    const vId = params.get('v') || path.split('/').pop();
+    if (vId && vId !== 'watch') {
+      try {
+        const res = await fetch(`${API}/videos/${vId}`);
+        if (res.ok) {
+          const video = await res.json();
+          openWatch(video, pushStateFlag);
+          return;
+        }
+      } catch (e) {
+        console.error('Failed to fetch video for routing:', e);
+      }
+    }
+    navigateTo('home', pushStateFlag);
+  } else if (path === '/trending') {
+    navigateTo('trending', pushStateFlag);
+  } else if (path === '/history') {
+    navigateTo('history', pushStateFlag);
+  } else if (path === '/settings') {
+    navigateTo('settings', pushStateFlag);
+  } else if (path === '/compare') {
+    navigateTo('compare', pushStateFlag);
+  } else {
+    navigateTo('home', pushStateFlag);
+  }
+}
+
+let watchUpdateInterval = null;
 
 // ============================================================
 // YouTube IFrame API (for auto-watch tracking)
@@ -71,9 +132,8 @@ window.onYouTubeIframeAPIReady = function() {
   console.log('[Shield] YouTube IFrame API ready');
 };
 
-function createYTPlayer(videoId) {
+function createYTPlayer(videoId, startSeconds = 0) {
   destroyYTPlayer();
-  watchAutoSaved = false;
   watchStartTime = null;
 
   const container = document.getElementById('watch-player');
@@ -88,6 +148,7 @@ function createYTPlayer(videoId) {
         autoplay: 1,
         modestbranding: 1,
         rel: 0,
+        start: startSeconds
       },
       events: {
         onStateChange: onPlayerStateChange,
@@ -96,49 +157,64 @@ function createYTPlayer(videoId) {
   } else {
     // Fallback: plain iframe if API not loaded yet
     container.innerHTML = `
-      <iframe src="https://www.youtube.com/embed/${videoId}?autoplay=1&modestbranding=1&rel=0"
+      <iframe src="https://www.youtube.com/embed/${videoId}?autoplay=1&modestbranding=1&rel=0&start=${startSeconds}"
         allow="autoplay; encrypted-media" allowfullscreen
         style="width:100%;height:100%;border:none;"></iframe>
     `;
+    // If fallback, we just save immediately at 0% since we can't track
+    setTimeout(() => saveCurrentProgress(false), 1000);
   }
 }
 
 function onPlayerStateChange(event) {
   // YT.PlayerState: PLAYING=1, PAUSED=2, ENDED=0
-  if (event.data === 1 && !watchStartTime) {
-    // Video started playing
-    watchStartTime = Date.now();
-  }
-
-  if ((event.data === 0 || event.data === 2) && !watchAutoSaved && watchStartTime && currentVideo) {
-    // Video ended or paused — auto-save to history
-    const watchedSeconds = Math.round((Date.now() - watchStartTime) / 1000);
-    const totalSeconds = currentVideo.duration_seconds || 300;
-    const watchPct = Math.min(1.0, watchedSeconds / Math.max(totalSeconds, 1));
-
-    // Only auto-save if watched > 10 seconds
-    if (watchedSeconds > 10) {
-      autoSaveWatch(currentVideo, watchPct, watchedSeconds);
+  if (event.data === 1) {
+    if (!watchStartTime) {
+      // Video started playing for the first time
+      watchStartTime = Date.now();
+      saveCurrentProgress(true); // show toast on first start
     }
-
-    // If video ended, reset start time for replay
+    
+    // Start periodic saving every 10 seconds
+    if (!watchUpdateInterval) {
+      watchUpdateInterval = setInterval(() => {
+        saveCurrentProgress(false);
+      }, 10000);
+    }
+  } else {
+    // PAUSED or ENDED
+    if (watchUpdateInterval) {
+      clearInterval(watchUpdateInterval);
+      watchUpdateInterval = null;
+    }
+    
+    if (event.data === 0 || event.data === 2) {
+      saveCurrentProgress(event.data === 0); // show toast if ended
+    }
     if (event.data === 0) {
-      watchStartTime = null;
+      watchStartTime = null; // reset if ended
     }
   }
 }
 
-function destroyYTPlayer() {
-  // Save watch progress before destroying
-  if (ytPlayer && watchStartTime && currentVideo && !watchAutoSaved) {
-    const watchedSeconds = Math.round((Date.now() - watchStartTime) / 1000);
-    const totalSeconds = currentVideo.duration_seconds || 300;
-    const watchPct = Math.min(1.0, watchedSeconds / Math.max(totalSeconds, 1));
-    if (watchedSeconds > 10) {
-      autoSaveWatch(currentVideo, watchPct, watchedSeconds);
-    }
-  }
+function saveCurrentProgress(showToastFlag = false) {
+  if (!watchStartTime || !currentVideo || !currentUser) return;
+  const watchedSeconds = Math.round((Date.now() - watchStartTime) / 1000);
+  const totalSeconds = currentVideo.duration_seconds || 300;
+  const watchPct = Math.min(1.0, watchedSeconds / Math.max(totalSeconds, 1));
+  
+  autoSaveWatch(currentVideo, watchPct, watchedSeconds, showToastFlag);
+}
 
+function destroyYTPlayer() {
+  if (watchUpdateInterval) {
+    clearInterval(watchUpdateInterval);
+    watchUpdateInterval = null;
+  }
+  
+  // Save final progress
+  saveCurrentProgress(false);
+  
   if (ytPlayer && typeof ytPlayer.destroy === 'function') {
     try { ytPlayer.destroy(); } catch {}
   }
@@ -150,9 +226,8 @@ function destroyYTPlayer() {
   if (container) container.innerHTML = '';
 }
 
-async function autoSaveWatch(video, watchPct, watchedSeconds) {
-  if (!currentUser || watchAutoSaved) return;
-  watchAutoSaved = true;
+async function autoSaveWatch(video, watchPct, watchedSeconds, showToastFlag = false) {
+  if (!currentUser) return;
 
   try {
     await fetch(`${API}/users/${currentUser.id}/history`, {
@@ -161,19 +236,23 @@ async function autoSaveWatch(video, watchPct, watchedSeconds) {
       body: JSON.stringify({
         video_id: video.video_id || '',
         title: video.title || '',
+        description: video.description || '',
         channel: video.channel_name || video.channel || '',
         thumbnail: video.thumbnail_url || video.thumbnail || '',
         duration_seconds: video.duration_seconds || 0,
+        view_count: video.view_count || 0,
+        like_count: video.like_count || 0,
+        subscriber_count: video.subscriber_count || 0,
         watch_pct: watchPct,
         agent_scores: video.agent_scores || {},
       }),
     });
 
-    // Show auto-save toast
-    showToast(`Saved to history (${formatDuration(watchedSeconds)} watched)`);
+    if (showToastFlag) {
+      showToast(`Saved to history (${formatDuration(watchedSeconds)} watched)`);
+    }
   } catch (err) {
     console.error('Auto-save watch failed:', err);
-    watchAutoSaved = false;
   }
 }
 
@@ -294,7 +373,7 @@ function setupNav() {
   });
 }
 
-function navigateTo(page) {
+function navigateTo(page, pushStateFlag = true) {
   // ── STOP VIDEO when leaving watch page ──
   if (currentPage === 'watch' && page !== 'watch') {
     destroyYTPlayer();
@@ -310,6 +389,14 @@ function navigateTo(page) {
   if (navEl) navEl.classList.add('active');
 
   currentPage = page;
+
+  if (pushStateFlag) {
+    if (page === 'home') {
+      history.pushState({ page: 'home' }, '', '/');
+    } else if (page !== 'watch') {
+      history.pushState({ page }, '', `/${page}`);
+    }
+  }
 
   if (page === 'trending') loadTrending();
   if (page === 'history') loadHistory();
@@ -816,18 +903,40 @@ function createCompareItem(video, rank, side) {
 // ============================================================
 // Watch Page (with auto-tracking)
 // ============================================================
-function openWatch(video) {
+async function openWatch(video, pushStateFlag = true) {
   // Stop any currently playing video first
   destroyYTPlayer();
 
   currentVideo = video;
-  navigateTo('watch');
+  navigateTo('watch', pushStateFlag);
+  
+  if (pushStateFlag) {
+    history.pushState({ page: 'watch', videoId: video.video_id }, '', `/watch?v=${video.video_id}`);
+  }
 
   const scores = video.agent_scores || {};
   const vid = video.video_id || '';
 
+  // Resume playback logic
+  let startSeconds = 0;
+  if (currentUser) {
+    try {
+      // Check recent history to see if user left off
+      const res = await fetch(`${API}/users/${currentUser.id}/history?limit=100`);
+      if (res.ok) {
+        const hist = await res.json();
+        const entry = hist.find(h => h.video_id === vid);
+        if (entry && entry.watch_pct && entry.watch_pct < 0.95) { // don't resume if almost finished
+          startSeconds = Math.floor(entry.watch_pct * entry.duration_seconds);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to fetch history for resume:', e);
+    }
+  }
+
   // Use YouTube IFrame API for tracking
-  createYTPlayer(vid);
+  createYTPlayer(vid, startSeconds);
 
   // Info
   document.getElementById('watch-title').textContent = video.title || '';
@@ -846,7 +955,25 @@ function openWatch(video) {
 
   // Description
   const desc = video.description || '';
-  document.getElementById('watch-description').textContent = desc.substring(0, 500) + (desc.length > 500 ? '...' : '');
+  const descEl = document.getElementById('watch-description');
+  descEl.classList.remove('expanded');
+  
+  if (desc.length > 200) {
+    descEl.innerHTML = escapeHtml(desc.substring(0, 200)) + '... <strong>Show more</strong>';
+    descEl.style.cursor = 'pointer';
+    descEl.onclick = () => {
+      const isExpanded = descEl.classList.toggle('expanded');
+      if (isExpanded) {
+        descEl.innerHTML = escapeHtml(desc) + '<br><br><strong>Show less</strong>';
+      } else {
+        descEl.innerHTML = escapeHtml(desc.substring(0, 200)) + '... <strong>Show more</strong>';
+      }
+    };
+  } else {
+    descEl.textContent = desc;
+    descEl.style.cursor = 'default';
+    descEl.onclick = null;
+  }
 
   // Hide previous explanation
   document.getElementById('watch-explanation').classList.add('hidden');

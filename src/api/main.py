@@ -39,7 +39,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.api.database import (
     register_user, login_user, get_user, update_user_settings,
-    list_users, log_watch, get_history, get_user_topic_stats,
+    list_users, log_watch, get_history, get_user_topic_stats, get_video
 )
 
 app = FastAPI(
@@ -303,9 +303,13 @@ class UpdateSettingsRequest(BaseModel):
 class WatchEventRequest(BaseModel):
     video_id: str
     title: str = ""
+    description: str = ""
     channel: str = ""
     thumbnail: str = ""
     duration_seconds: int = 0
+    view_count: int = 0
+    like_count: int = 0
+    subscriber_count: int = 0
     watch_pct: float = 1.0
     agent_scores: Optional[Dict[str, Any]] = None
 
@@ -621,9 +625,13 @@ def api_log_watch(user_id: str, req: WatchEventRequest):
         user_id=user_id,
         video_id=req.video_id,
         title=req.title,
+        description=req.description,
         channel=req.channel,
         thumbnail=req.thumbnail,
         duration_seconds=req.duration_seconds,
+        view_count=req.view_count,
+        like_count=req.like_count,
+        subscriber_count=req.subscriber_count,
         watch_pct=req.watch_pct,
         agent_scores=req.agent_scores,
     )
@@ -634,6 +642,31 @@ def api_get_history(user_id: str, limit: int = 50):
     if not get_user(user_id):
         raise HTTPException(status_code=404, detail="User not found")
     return get_history(user_id, limit=limit)
+
+
+@app.get("/api/videos/{video_id}")
+def api_get_video(video_id: str):
+    # 1. Check database (videos table)
+    video = get_video(video_id)
+    if video:
+        return video
+    
+    # 2. Check catalog
+    catalog = _load_scored_catalog()
+    for v in catalog.get("videos", []):
+        if v.get("video_id") == video_id:
+            return v
+            
+    # 3. Fallback: Search YouTube (expensive, but necessary if direct link to unindexed video)
+    # Since search_youtube returns a list based on a query, we can query the video_id directly
+    # Wait, the search_youtube function calls scrape_topic, which searches by string.
+    # It might not return the exact video if we just search the ID. But we'll try.
+    results = search_youtube(video_id, max_results=1)
+    for v in results:
+        if v.get("video_id") == video_id:
+            return score_video(v)
+            
+    raise HTTPException(status_code=404, detail="Video not found")
 
 
 @app.get("/api/users/{user_id}/recommend")
