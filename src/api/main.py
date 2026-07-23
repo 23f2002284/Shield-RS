@@ -26,6 +26,8 @@ import json
 import time
 import random
 import traceback
+import urllib.request
+import urllib.parse
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -39,7 +41,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.api.database import (
     register_user, login_user, get_user, update_user_settings,
-    list_users, log_watch, get_history, get_user_topic_stats, get_video
+    list_users, log_watch, get_history, get_user_topic_stats, get_video,
+    log_search, get_search_history, clear_search_history, delete_search_history_item
 )
 
 app = FastAPI(
@@ -278,6 +281,7 @@ class SearchRequest(BaseModel):
     max_results: int = 20
     time_budget_minutes: int = 60
     quality_preference: str = "balanced"
+    user_id: Optional[str] = None
 
 class RegisterRequest(BaseModel):
     name: str
@@ -408,6 +412,12 @@ def _diversify_feed(videos: list, max_per_topic_consecutive: int = 3) -> list:
 @app.post("/api/search")
 def search(req: SearchRequest):
     """Live YouTube search + Shield scoring."""
+    if req.user_id:
+        try:
+            log_search(req.user_id, req.query)
+        except Exception as e:
+            print(f"[WARN] Failed to log search for {req.user_id}: {e}")
+
     t0 = time.time()
     print(f"\n[Search] Query: '{req.query}' | max={req.max_results}")
 
@@ -648,6 +658,46 @@ def api_get_history(user_id: str, limit: int = 50):
     if not get_user(user_id):
         raise HTTPException(status_code=404, detail="User not found")
     return get_history(user_id, limit=limit)
+
+
+@app.get("/api/users/{user_id}/search_history")
+def api_get_search_history(user_id: str, limit: int = 10):
+    if not get_user(user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+    return get_search_history(user_id, limit=limit)
+
+
+@app.delete("/api/users/{user_id}/search_history")
+def api_delete_search_history(user_id: str, query: Optional[str] = None):
+    if not get_user(user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if query:
+        delete_search_history_item(user_id, query)
+    else:
+        clear_search_history(user_id)
+        
+    return {"status": "ok"}
+
+
+@app.get("/api/search/autocomplete")
+def api_autocomplete(q: str):
+    """Proxy for YouTube search autocomplete."""
+    if not q:
+        return []
+    
+    url = f"http://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={urllib.parse.quote(q)}"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read().decode())
+            # Google suggest format: [ "query", ["suggestion1", "suggestion2", ...] ]
+            if len(data) > 1 and isinstance(data[1], list):
+                return data[1]
+    except Exception as e:
+        print(f"[WARN] Autocomplete failed: {e}")
+    
+    return []
 
 
 @app.get("/api/videos/{video_id}")

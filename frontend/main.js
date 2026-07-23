@@ -20,6 +20,7 @@ let currentVideo = null;
 let ytPlayer = null;           // YouTube IFrame API player
 let watchStartTime = null;     // When video started playing
 let watchAutoSaved = false;    // Prevent double-saving
+let searchHistoryCache = [];
 
 // ── Dynamic Topic Suggestions ──
 const TOPIC_SUGGESTIONS = [
@@ -285,6 +286,7 @@ function restoreSession() {
     try {
       currentUser = JSON.parse(saved);
       updateAuthUI();
+      fetchSearchHistory();
       // Asynchronously verify that the user still exists in the backend
       verifySession(currentUser.id);
     } catch { currentUser = null; }
@@ -317,8 +319,24 @@ function saveSession(user) {
 
 function clearSession() {
   currentUser = null;
+  searchHistoryCache = [];
   localStorage.removeItem('shield_user');
   updateAuthUI();
+}
+
+async function fetchSearchHistory() {
+  if (!currentUser) {
+    searchHistoryCache = [];
+    return;
+  }
+  try {
+    const res = await fetch(`${API}/users/${currentUser.id}/search_history`);
+    if (res.ok) {
+      searchHistoryCache = await res.json();
+    }
+  } catch(err) {
+    console.error('Failed to fetch search history', err);
+  }
 }
 
 function updateAuthUI() {
@@ -482,6 +500,7 @@ function setupAuth() {
         return;
       }
       saveSession(data);
+      fetchSearchHistory();
       modal.classList.add('hidden');
       loadFeed();
     } catch (err) {
@@ -533,6 +552,7 @@ function setupAuth() {
         return;
       }
       saveSession(data);
+      fetchSearchHistory();
       modal.classList.add('hidden');
       loadFeed();
     } catch (err) {
@@ -736,9 +756,18 @@ function setupSearch() {
   maxInput.addEventListener('input', () => maxSpan.textContent = maxInput.value);
   timeInput.addEventListener('input', () => timeSpan.textContent = timeInput.value);
 
+let autocompleteDebounceTimer = null;
+
   // Dynamic suggestions on focus/input
   input.addEventListener('focus', () => showSuggestions(input.value));
-  input.addEventListener('input', () => showSuggestions(input.value));
+  input.addEventListener('input', () => {
+    showSuggestions(input.value);
+    clearTimeout(autocompleteDebounceTimer);
+    autocompleteDebounceTimer = setTimeout(() => {
+      const q = input.value.trim();
+      if (q.length > 0) fetchAutocomplete(q);
+    }, 250);
+  });
 
   // Hide on click outside
   document.addEventListener('click', (e) => {
@@ -750,29 +779,118 @@ function setupSearch() {
   });
 }
 
-function showSuggestions(query) {
-  const suggestionsEl = document.getElementById('search-suggestions');
-  const q = query.toLowerCase().trim();
+async function fetchAutocomplete(query) {
+  try {
+    const res = await fetch(`${API}/search/autocomplete?q=${encodeURIComponent(query)}`);
+    if (res.ok) {
+      const completions = await res.json();
+      const input = document.getElementById('global-search');
+      // Only render if the input value hasn't drastically changed
+      if (input.value.trim().toLowerCase() === query.toLowerCase() && completions.length > 0) {
+        // Render completions as search suggestions
+        const items = completions.slice(0, 5).map(c => ({ text: c, icon: 'search' }));
+        // Also include local history/video matches to not lose them
+        renderSuggestions(query, items);
+      }
+    }
+  } catch(e) {
+    console.error('Autocomplete failed', e);
+  }
+}
 
+async function deleteHistoryItem(query, e) {
+  e.stopPropagation();
+  if (!currentUser) return;
+  try {
+    await fetch(`${API}/users/${currentUser.id}/search_history?query=${encodeURIComponent(query)}`, { method: 'DELETE' });
+    searchHistoryCache = searchHistoryCache.filter(h => h.query !== query);
+    showSuggestions(document.getElementById('global-search').value);
+  } catch(err) {
+    console.error(err);
+  }
+}
+
+async function clearAllHistory(e) {
+  e.stopPropagation();
+  if (!currentUser) return;
+  try {
+    await fetch(`${API}/users/${currentUser.id}/search_history`, { method: 'DELETE' });
+    searchHistoryCache = [];
+    showSuggestions(document.getElementById('global-search').value);
+  } catch(err) {
+    console.error(err);
+  }
+}
+
+function showSuggestions(query) {
+  const q = query.toLowerCase().trim();
   let items = [];
+
+  // Section 0: Search History (if logged in)
+  if (currentUser && searchHistoryCache.length > 0) {
+    if (q.length > 0) {
+      const historyMatches = searchHistoryCache
+        .filter(h => h.query.toLowerCase().includes(q))
+        .slice(0, 3)
+        .map(h => ({ text: h.query, icon: 'history', isHistory: true }));
+      if (historyMatches.length > 0) items.push(...historyMatches);
+    } else {
+      const recentHistory = searchHistoryCache
+        .slice(0, 5)
+        .map(h => ({ text: h.query, icon: 'history', isHistory: true }));
+      if (recentHistory.length > 0) items.push(...recentHistory);
+    }
+  }
 
   // Section 1: Matching catalog topics
   if (q.length > 0) {
     const matching = TOPIC_SUGGESTIONS.filter(s =>
       s.text.toLowerCase().includes(q)
-    ).slice(0, 5);
+    ).slice(0, 3);
     if (matching.length > 0) items.push(...matching);
 
     // Section 2: Search within cached video titles
     const titleMatches = feedCache
       .filter(v => v.title && v.title.toLowerCase().includes(q))
-      .slice(0, 3)
+      .slice(0, 2)
       .map(v => ({ text: v.title.substring(0, 60), icon: 'video', video: v }));
     if (titleMatches.length > 0) items.push(...titleMatches);
   } else {
-    // Show trending suggestions when empty
-    const shuffled = [...TOPIC_SUGGESTIONS].sort(() => Math.random() - 0.5).slice(0, 8);
-    items = shuffled;
+    // Show trending suggestions when empty, if we didn't fill with enough history
+    if (items.length < 5) {
+      const shuffled = [...TOPIC_SUGGESTIONS].sort(() => Math.random() - 0.5).slice(0, 8 - items.length);
+      items.push(...shuffled);
+    }
+  }
+
+  renderSuggestions(q, items);
+}
+
+function renderSuggestions(q, extraItems = null) {
+  const suggestionsEl = document.getElementById('search-suggestions');
+  let items = [];
+  
+  if (extraItems && q.length > 0) {
+    // If we have extraItems (from autocomplete), we want them to dominate, but keep history at top
+    const historyItems = (currentUser ? searchHistoryCache : [])
+        .filter(h => h.query.toLowerCase().includes(q))
+        .slice(0, 2)
+        .map(h => ({ text: h.query, icon: 'history', isHistory: true }));
+        
+    items = [...historyItems, ...extraItems];
+    
+    // Deduplicate
+    const seen = new Set();
+    items = items.filter(item => {
+      if (seen.has(item.text.toLowerCase())) return false;
+      seen.add(item.text.toLowerCase());
+      return true;
+    });
+  } else {
+    // If no extra items, this is a local render, but we need to fetch the items again
+    // We already computed them in showSuggestions, but since renderSuggestions is a separate function, 
+    // let's assume `extraItems` contains the local items if called from `showSuggestions`.
+    if (extraItems) items = extraItems;
   }
 
   if (items.length === 0) {
@@ -783,19 +901,44 @@ function showSuggestions(query) {
   suggestionsEl.innerHTML = '';
 
   // Add section header
-  if (q.length === 0) {
+  if (q.length === 0 && currentUser && searchHistoryCache.length > 0) {
+    suggestionsEl.innerHTML = `
+      <div class="suggestion-section" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>Recent searches</span>
+        <button onclick="clearAllHistory(event)" style="background:none;border:none;color:var(--primary);cursor:pointer;font-size:12px;">Clear All</button>
+      </div>`;
+  } else if (q.length === 0) {
     suggestionsEl.innerHTML = '<div class="suggestion-section">Trending searches</div>';
   }
 
   items.forEach(item => {
     const div = document.createElement('div');
     div.className = 'suggestion-item';
-    const iconSvg = item.icon === 'video'
-      ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>'
-      : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>';
+    
+    let iconSvg = '';
+    if (item.icon === 'video') {
+      iconSvg = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+    } else if (item.icon === 'history') {
+      iconSvg = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+    } else {
+      iconSvg = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>';
+    }
 
-    div.innerHTML = `${iconSvg}<span>${escapeHtml(item.text)}</span>`;
-    div.addEventListener('click', () => {
+    let innerHtml = `${iconSvg}<span>${escapeHtml(item.text)}</span>`;
+    
+    // Add delete button for individual history items
+    if (item.isHistory) {
+        innerHtml += `<button class="delete-history-btn" onclick="deleteHistoryItem('${escapeHtml(item.text.replace(/'/g, "\\'"))}', event)" style="margin-left:auto;background:none;border:none;color:var(--text-muted);cursor:pointer;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>`;
+    }
+    
+    div.innerHTML = innerHtml;
+    
+    div.addEventListener('click', (e) => {
+      // Ignore click if it was on the delete button (already handled by onclick attribute)
+      if (e.target.closest('.delete-history-btn')) return;
+      
       const input = document.getElementById('global-search');
       if (item.video) {
         // Direct to video
@@ -820,6 +963,10 @@ function showSuggestions(query) {
     if (filterBtn) filterBtn.classList.remove('active');
   }
 }
+
+// Make globally available for onclick handlers
+window.deleteHistoryItem = deleteHistoryItem;
+window.clearAllHistory = clearAllHistory;
 
 async function performSearch(query) {
   const grid = document.getElementById('search-grid');
@@ -848,6 +995,11 @@ async function performSearch(query) {
   document.getElementById('global-search-filter-btn')?.classList.remove('active');
 
   try {
+    // Update local history immediately for snappy UI
+    if (currentUser) {
+      searchHistoryCache = [{query: query, searched_at: new Date().toISOString()}, ...searchHistoryCache.filter(h => h.query !== query)].slice(0, 10);
+    }
+    
     const res = await fetch(`${API}/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -855,7 +1007,8 @@ async function performSearch(query) {
         query, 
         max_results: maxVideos,
         time_budget_minutes: timeBudget,
-        quality_preference: qualityPref
+        quality_preference: qualityPref,
+        user_id: currentUser ? currentUser.id : null
       }),
     });
     const data = await res.json();

@@ -108,6 +108,17 @@ def init_db():
 
         CREATE INDEX IF NOT EXISTS idx_history_user
             ON watch_history(user_id, watched_at DESC);
+
+        CREATE TABLE IF NOT EXISTS search_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            query TEXT NOT NULL,
+            searched_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_search_history_user
+            ON search_history(user_id, searched_at DESC);
     """)
     conn.commit()
     conn.close()
@@ -437,5 +448,76 @@ def get_user_topic_stats(user_id: str) -> dict:
     return topics
 
 
+# ---------------------------------------------------------------------------
+# Search History
+# ---------------------------------------------------------------------------
+
+def log_search(user_id: str, query: str) -> dict:
+    """Log a search query for a user."""
+    now = datetime.utcnow().isoformat()
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO search_history (user_id, query, searched_at)
+           VALUES (?, ?, ?)""",
+        (user_id, query, now)
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "user_id": user_id,
+        "query": query,
+        "searched_at": now
+    }
+
+
+def get_search_history(user_id: str, limit: int = 10) -> list[dict]:
+    """Get a user's recent search history, newest first."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT query, searched_at 
+           FROM search_history 
+           WHERE user_id = ?
+           ORDER BY searched_at DESC
+           LIMIT ?""",
+        (user_id, limit),
+    ).fetchall()
+    conn.close()
+    
+    # Optional: deduplicate adjacent or all identical queries? 
+    # Usually we just return the most recent unique queries.
+    # Let's deduplicate while keeping order.
+    unique_queries = []
+    seen = set()
+    for r in rows:
+        q = r["query"]
+        if q.lower() not in seen:
+            seen.add(q.lower())
+            unique_queries.append({
+                "query": q,
+                "searched_at": r["searched_at"]
+            })
+    return unique_queries
+
+
+def clear_search_history(user_id: str) -> bool:
+    """Clear all search history for a user."""
+    conn = _get_conn()
+    conn.execute("DELETE FROM search_history WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_search_history_item(user_id: str, query: str) -> bool:
+    """Delete a specific search query from a user's history."""
+    conn = _get_conn()
+    # Delete all occurrences of this query for this user (case-insensitive if needed, but exact is fine for now)
+    conn.execute("DELETE FROM search_history WHERE user_id = ? AND query = ?", (user_id, query))
+    conn.commit()
+    conn.close()
+    return True
+
+
 # Initialize on import
 init_db()
+
