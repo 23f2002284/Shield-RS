@@ -21,6 +21,7 @@ let ytPlayer = null;           // YouTube IFrame API player
 let watchStartTime = null;     // When video started playing
 let watchAutoSaved = false;    // Prevent double-saving
 let searchHistoryCache = [];
+let lastSearchResults = [];
 
 // ── Dynamic Topic Suggestions ──
 const TOPIC_SUGGESTIONS = [
@@ -659,6 +660,7 @@ async function loadFeed() {
 
     feedCache = data.videos || [];
     feedTopics = data.topics || [];
+    lastSearchResults = []; // Clear search context when returning to feed
 
     // Build topic filter chips
     filterBar.innerHTML = '<button class="filter-chip active" data-topic="all">All</button>';
@@ -1016,6 +1018,7 @@ async function performSearch(query) {
     loading.classList.add('hidden');
 
     const videos = data.videos || [];
+    lastSearchResults = videos;
     if (videos.length === 0) {
       empty.classList.remove('hidden');
       return;
@@ -1268,12 +1271,31 @@ function loadWatchRecs(currentVid) {
   recsEl.innerHTML = '';
 
   const topic = currentVid.topic || '';
-  let recs = feedCache.filter(v =>
+  let recs = [];
+  
+  // 1. If we have recent search results, they are highly relevant context
+  if (lastSearchResults && lastSearchResults.length > 0) {
+      const searchRecs = lastSearchResults.filter(v => v.video_id !== currentVid.video_id);
+      recs.push(...searchRecs.slice(0, 8)); // take up to 8 from search context
+  }
+  
+  // 2. Mix in videos from the main catalog (feedCache)
+  const catalogRecs = feedCache.filter(v =>
     v.video_id !== currentVid.video_id &&
+    !recs.some(r => r.video_id === v.video_id) &&
     (v.topic === topic || !topic)
-  ).slice(0, 15);
+  );
+  
+  recs.push(...catalogRecs.slice(0, 15 - recs.length));
 
-  if (recs.length === 0) recs = feedCache.slice(0, 15);
+  // 3. Fallback: if we still don't have enough, grab random from catalog
+  if (recs.length < 5) {
+      const fallback = feedCache.filter(v =>
+          v.video_id !== currentVid.video_id &&
+          !recs.some(r => r.video_id === v.video_id)
+      );
+      recs.push(...fallback.slice(0, 15 - recs.length));
+  }
 
   recs.forEach(v => {
     const item = document.createElement('div');
